@@ -39,11 +39,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <header className="sticky top-0 z-40 border-b border-border/70 bg-background/75 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
-          <Link href="/library" className="group flex items-baseline gap-2">
-            <span className="text-xl font-semibold tracking-tight text-foreground transition group-hover:text-accent">
-              TangoDJ
+          <Link href="/library" className="group flex items-center gap-2.5">
+            <img
+              src="/tango-mark.png"
+              alt=""
+              width={36}
+              height={36}
+              className="h-9 w-9 object-contain transition group-hover:opacity-90"
+            />
+            <span className="flex items-baseline gap-2">
+              <span className="text-xl font-semibold tracking-tight text-foreground transition group-hover:text-accent">
+                TangoDJ
+              </span>
+              <span className="hidden text-xs text-muted sm:inline">milonga desk</span>
             </span>
-            <span className="hidden text-xs text-muted sm:inline">milonga desk</span>
           </Link>
           <nav className="flex flex-wrap items-center gap-1" aria-label="Main">
             {NAV.map((item) => {

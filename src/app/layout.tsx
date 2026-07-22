@@ -29,8 +29,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${display.variable} ${sans.variable} antialiased`}>
+    <html lang="en" suppressHydrationWarning>
+      <body
+        className={`${display.variable} ${sans.variable} antialiased`}
+        suppressHydrationWarning
+      >
         <SpotifyProvider>
           <LibraryProvider>
             <PlaybackProvider>{children}</PlaybackProvider>
