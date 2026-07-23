@@ -5,17 +5,6 @@ import { useEffect } from "react";
 import { useSpotify } from "@/context/SpotifyContext";
 import { DASHBOARD_LINK } from "@/lib/constants";
 
-const LOGIN_HREF = (() => {
-  const redirect = process.env.NEXT_PUBLIC_SPOTIFY_REDIRECT_URI;
-  if (!redirect) return "/login";
-  try {
-    const u = new URL(redirect);
-    return `${u.protocol}//${u.host}/login`;
-  } catch {
-    return "/login";
-  }
-})();
-
 export default function HomePage() {
   const router = useRouter();
   const { isAuthenticated } = useSpotify();
@@ -51,7 +40,7 @@ export default function HomePage() {
           style={{ animationDelay: "180ms" }}
         >
           <a
-            href={LOGIN_HREF}
+            href="/login"
             className="pill bg-accent px-6 py-3 text-sm font-semibold text-background transition hover:bg-accent-hover"
           >
             Sign in with Spotify

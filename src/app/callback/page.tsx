@@ -4,6 +4,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { exchangeCodeForToken } from "@/lib/auth";
 import { useSpotify } from "@/context/SpotifyContext";
+import { getSpotifyRedirectUri } from "@/lib/spotifyRedirect";
 
 function CallbackContent() {
   const router = useRouter();
@@ -21,16 +22,23 @@ function CallbackContent() {
 
     if (!code || !codeVerifier) {
       const msg = code
-        ? "Session expired. Log in again using the same host (127.0.0.1)."
+        ? "Session expired. Log in again from the same site URL."
         : "Missing authorization code. Please try logging in again.";
       queueMicrotask(() => setError(msg));
       return;
     }
 
     const clientId = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
-    const redirectUri = process.env.NEXT_PUBLIC_SPOTIFY_REDIRECT_URI;
 
-    if (!clientId || !redirectUri) {
+    if (!clientId) {
+      queueMicrotask(() => setError("Server configuration error."));
+      return;
+    }
+
+    let redirectUri: string;
+    try {
+      redirectUri = getSpotifyRedirectUri();
+    } catch {
       queueMicrotask(() => setError("Server configuration error."));
       return;
     }
