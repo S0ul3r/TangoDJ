@@ -189,7 +189,7 @@ export default function TandasPage() {
               {editingId && (
                 <button
                   type="button"
-                  onClick={startNew}
+                  onClick={() => startNew()}
                   className="text-xs text-muted hover:text-foreground"
                 >
                   Clear
