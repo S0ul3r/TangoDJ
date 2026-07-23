@@ -7,6 +7,15 @@ import { fetchWithAuth } from "@/lib/spotify";
 import type { SpotifyDevice } from "@/types/domain";
 
 async function parseError(res: Response): Promise<string> {
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("Retry-After");
+    const seconds = retryAfter ? Number.parseInt(retryAfter, 10) : NaN;
+    if (Number.isFinite(seconds) && seconds > 0) {
+      const mins = Math.max(1, Math.ceil(seconds / 60));
+      return `Spotify rate limit — wait ~${mins} min and try again`;
+    }
+    return "Spotify rate limit — wait a bit and try again";
+  }
   try {
     const body = await res.json();
     const msg = body?.error?.message ?? body?.error ?? res.statusText;
