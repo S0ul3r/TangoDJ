@@ -85,12 +85,8 @@ Development Mode apps can only read playlist **contents** for playlists you own 
 
 ### Local files (Chrome / Edge)
 
-**Into the active genre** (flat folder or loose MP3s — e.g. cortina soundboard files):
-
-- **Add local file(s)** — pick one or more audio files
-- **Import folder into [genre]** — scan a folder of mp3/m4a/wav/flac/ogg into the selected tab
-
-**Structured library** (optional — top-right button):
+- **Import folder** — scan a folder of mp3/m4a/wav/flac/ogg into the **active genre tab**
+- **Link structured library** (optional) — one root with genre subfolders:
 
 ```
 MyTango/

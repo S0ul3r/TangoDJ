@@ -4,3 +4,4 @@ export const DASHBOARD_LINK = "https://developer.spotify.com/dashboard";
 
 export const LAST_DEVICE_KEY = "tangodj_last_device_id";
 export const LOCAL_FOLDER_HANDLE_KEY = "tangodj_folder_handle";
+export const LIBRARY_IMPORT_OPEN_KEY = "tangodj_library_import_open";

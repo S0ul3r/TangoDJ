@@ -10,6 +10,7 @@ export class LocalAudioPlayer {
   private objectUrl: string | null = null;
   private onEnded: EndedHandler | null = null;
   private onError: ErrorHandler | null = null;
+  private volume = 1;
 
   setEndedHandler(handler: EndedHandler | null) {
     this.onEnded = handler;
@@ -25,6 +26,7 @@ export class LocalAudioPlayer {
     this.audio = audio;
     this.objectUrl = URL.createObjectURL(file);
     audio.src = this.objectUrl;
+    audio.volume = this.volume;
     audio.onended = () => this.onEnded?.();
     audio.onerror = () => this.onError?.("Failed to play local audio file.");
     await audio.play();
@@ -36,6 +38,16 @@ export class LocalAudioPlayer {
 
   async resume(): Promise<void> {
     await this.audio?.play();
+  }
+
+  seek(seconds: number): void {
+    if (!this.audio || !Number.isFinite(seconds)) return;
+    this.audio.currentTime = Math.max(0, seconds);
+  }
+
+  setVolume(level: number): void {
+    this.volume = Math.min(1, Math.max(0, level));
+    if (this.audio) this.audio.volume = this.volume;
   }
 
   stop(): void {

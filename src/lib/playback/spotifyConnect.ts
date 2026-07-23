@@ -103,6 +103,61 @@ export async function skipToNext(
   }
 }
 
+export async function seekPlayback(
+  accessToken: string,
+  positionMs: number,
+  deviceId?: string | null
+): Promise<void> {
+  const params = new URLSearchParams({
+    position_ms: String(Math.max(0, Math.round(positionMs))),
+  });
+  if (deviceId) params.set("device_id", deviceId);
+  const res = await fetchWithAuth(
+    `${SPOTIFY_API_BASE}/me/player/seek?${params}`,
+    accessToken,
+    { method: "PUT" }
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(await parseError(res));
+  }
+}
+
+export async function setPlaybackVolume(
+  accessToken: string,
+  volumePercent: number,
+  deviceId?: string | null
+): Promise<void> {
+  const clamped = Math.min(100, Math.max(0, Math.round(volumePercent)));
+  const params = new URLSearchParams({ volume_percent: String(clamped) });
+  if (deviceId) params.set("device_id", deviceId);
+  const res = await fetchWithAuth(
+    `${SPOTIFY_API_BASE}/me/player/volume?${params}`,
+    accessToken,
+    { method: "PUT" }
+  );
+  if (!res.ok && res.status !== 204) {
+    throw new Error(await parseError(res));
+  }
+}
+
+/** Turn off repeat so single-URI plays don't loop the first track. */
+export async function setRepeatMode(
+  accessToken: string,
+  state: "off" | "track" | "context" = "off",
+  deviceId?: string | null
+): Promise<void> {
+  const params = new URLSearchParams({ state });
+  if (deviceId) params.set("device_id", deviceId);
+  const res = await fetchWithAuth(
+    `${SPOTIFY_API_BASE}/me/player/repeat?${params}`,
+    accessToken,
+    { method: "PUT" }
+  );
+  if (!res.ok && res.status !== 204) {
+    /* non-fatal — Premium / device quirks */
+  }
+}
+
 export interface PlayerState {
   is_playing: boolean;
   progress_ms: number | null;

@@ -17,15 +17,12 @@ import type {
 } from "@/types/domain";
 import {
   loadDirectoryHandle,
-  pickAudioFiles,
   pickFlatAudioFolder,
   pickLibraryFolder,
   persistDirectoryHandle,
-  persistFileHandle,
   resolveTrackLocalFile,
   scanFlatFolder,
   scanLibraryFolder,
-  supportsFilePicker,
   supportsFileSystemAccess,
 } from "@/lib/localFiles";
 import { loadLibraryCache, saveLibraryCache } from "@/lib/cache";
@@ -40,7 +37,6 @@ interface LibraryContextType {
   cacheSavedAt: string | null;
   folderLinked: boolean;
   supportsLocal: boolean;
-  supportsFilePick: boolean;
   refresh: () => Promise<void>;
   upsertTracks: (tracks: Track[]) => Promise<void>;
   deleteTracks: (ids: string[]) => Promise<void>;
@@ -49,7 +45,6 @@ interface LibraryContextType {
   upsertEvent: (event: MilongaEvent) => Promise<void>;
   deleteEvent: (id: string) => Promise<void>;
   linkLocalFolder: () => Promise<number>;
-  importLocalFilesToGenre: (genre: Genre) => Promise<number>;
   importLocalFolderToGenre: (genre: Genre) => Promise<number>;
   getLocalFile: (track: Track) => Promise<File | Blob | null>;
   tracksByGenre: (genre: Genre) => Track[];
@@ -73,7 +68,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   const [folderHandle, setFolderHandle] =
     useState<FileSystemDirectoryHandle | null>(null);
   const [supportsLocal, setSupportsLocal] = useState(false);
-  const [supportsFilePick, setSupportsFilePick] = useState(false);
   const [cacheSavedAt, setCacheSavedAt] = useState<string | null>(null);
 
   const authFetch = useCallback(
@@ -148,7 +142,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setSupportsLocal(supportsFileSystemAccess());
-    setSupportsFilePick(supportsFilePicker());
   }, []);
 
   useEffect(() => {
@@ -319,41 +312,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
     [tracks, upsertTracks]
   );
 
-  const importLocalFilesToGenre = useCallback(
-    async (genre: Genre) => {
-      const handles = await pickAudioFiles();
-      const now = new Date().toISOString();
-      const mapped = [];
-      for (const fh of handles) {
-        const id = crypto.randomUUID();
-        await persistFileHandle(id, fh);
-        const file = await fh.getFile();
-        const name = file.name.replace(/\.(mp3|m4a|wav|flac|ogg)$/i, "");
-        mapped.push({
-          id,
-          source: "local" as const,
-          genre,
-          name,
-          artists: "",
-          orchestra: null,
-          year: null,
-          singer: null,
-          durationMs: null,
-          spotifyUri: null,
-          spotifyId: null,
-          albumArtUrl: null,
-          localRelPath: `@file:${id}`,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-      const newTracks = dedupeTracksAgainstLibrary(mapped, tracks);
-      if (newTracks.length) await upsertTracks(newTracks);
-      return newTracks.length;
-    },
-    [tracks, upsertTracks]
-  );
-
   const getLocalFile = useCallback(
     async (track: Track) => {
       if (track.source !== "local" || !track.localRelPath) return null;
@@ -382,7 +340,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       cacheSavedAt,
       folderLinked: !!folderHandle,
       supportsLocal,
-      supportsFilePick,
       refresh,
       upsertTracks,
       deleteTracks,
@@ -391,7 +348,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       upsertEvent,
       deleteEvent,
       linkLocalFolder,
-      importLocalFilesToGenre,
       importLocalFolderToGenre,
       getLocalFile,
       tracksByGenre,
@@ -405,7 +361,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       cacheSavedAt,
       folderHandle,
       supportsLocal,
-      supportsFilePick,
       refresh,
       upsertTracks,
       deleteTracks,
@@ -414,7 +369,6 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
       upsertEvent,
       deleteEvent,
       linkLocalFolder,
-      importLocalFilesToGenre,
       importLocalFolderToGenre,
       getLocalFile,
       tracksByGenre,

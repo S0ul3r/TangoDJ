@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { useLibrary } from "@/context/LibraryContext";
 import { useSpotify } from "@/context/SpotifyContext";
 import { useSpotifyPlaylists } from "@/hooks/useSpotifyPlaylists";
+import { LIBRARY_IMPORT_OPEN_KEY } from "@/lib/constants";
 import { parsePlaylistId, searchTracks } from "@/lib/spotify";
 import {
   createSpotifyTrack,
@@ -22,10 +23,8 @@ export default function LibraryPage() {
     upsertTracks,
     deleteTracks,
     linkLocalFolder,
-    importLocalFilesToGenre,
     importLocalFolderToGenre,
     supportsLocal,
-    supportsFilePick,
     folderLinked,
   } = useLibrary();
   const { getValidToken } = useSpotify();
@@ -47,6 +46,45 @@ export default function LibraryPage() {
   const [selectedPlaylistId, setSelectedPlaylistId] = useState("");
   const [importing, setImporting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // null until localStorage preference is read — avoids hide animation on remount
+  const [importOpen, setImportOpen] = useState<boolean | null>(null);
+  const [importCanAnimate, setImportCanAnimate] = useState(false);
+
+  useEffect(() => {
+    let open = true;
+    try {
+      const stored = localStorage.getItem(LIBRARY_IMPORT_OPEN_KEY);
+      if (stored === "0") open = false;
+      else if (stored === "1") open = true;
+    } catch {
+      /* ignore */
+    }
+    setImportOpen(open);
+    // Enable transitions only after the saved open/closed state is applied,
+    // so remounts (tab switch / refresh) don't replay the hide animation.
+    let cancelled = false;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (!cancelled) setImportCanAnimate(true);
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(id);
+    };
+  }, []);
+
+  const isImportOpen = importOpen === true;
+
+  const setImportOpenPersist = (open: boolean) => {
+    setImportCanAnimate(true);
+    setImportOpen(open);
+    try {
+      localStorage.setItem(LIBRARY_IMPORT_OPEN_KEY, open ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  };
 
   const list = tracksByGenre(genre);
   const hasSelection = selectedIds.size > 0;
@@ -161,21 +199,6 @@ export default function LibraryPage() {
     }
   };
 
-  const onImportLocalFiles = async () => {
-    try {
-      const n = await importLocalFilesToGenre(genre);
-      setMessage(
-        n > 0
-          ? `Added ${n} local file${n === 1 ? "" : "s"} to ${GENRE_LABELS[genre]}.`
-          : "No new files added."
-      );
-      setMessageTone(n > 0 ? "ok" : "warn");
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "File import failed");
-      setMessageTone("warn");
-    }
-  };
-
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -219,198 +242,214 @@ export default function LibraryPage() {
 
   return (
     <AppShell>
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Library</h1>
-          <p className="mt-1 text-muted">
-            Link a playlist into the active category, search Spotify, or add
-            local files.
-          </p>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          {TABS.map((g) => (
+            <button
+              key={g}
+              type="button"
+              onClick={() => {
+                setGenre(g);
+                setSelectedIds(new Set());
+              }}
+              className={`pill px-4 py-2 text-sm transition ${
+                genre === g
+                  ? "bg-accent text-background"
+                  : "bg-surface/80 text-muted hover:bg-surface-2 hover:text-foreground"
+              }`}
+            >
+              {GENRE_LABELS[g]}
+              <span className="ml-2 opacity-70">{counts[g]}</span>
+            </button>
+          ))}
         </div>
-        {supportsLocal && (
-          <button
-            type="button"
-            onClick={() => void onImportStructuredFolder()}
-            className="pill border border-border bg-surface/70 px-4 py-2 text-sm transition hover:border-accent hover:text-accent"
-            title="Expects MyTango/Tango|Vals|Milonga|Cortina"
+        <button
+          type="button"
+          onClick={() => setImportOpenPersist(!isImportOpen)}
+          className="pill inline-flex items-center gap-1.5 border border-border bg-surface/70 px-3.5 py-2 text-sm text-muted transition hover:border-accent hover:text-accent"
+          aria-expanded={isImportOpen}
+        >
+          <svg
+            aria-hidden
+            viewBox="0 0 16 16"
+            className={`h-3.5 w-3.5 shrink-0 ${
+              importCanAnimate ? "transition-transform duration-300 ease-out" : ""
+            } ${isImportOpen ? "" : "rotate-180"}`}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
           >
-            {folderLinked ? "Rescan structured library" : "Link structured library"}
-          </button>
-        )}
+            <path d="M3 10.5 8 5.5l5 5" />
+          </svg>
+          {isImportOpen ? "Hide import tools" : "Show import tools"}
+        </button>
       </div>
 
-      <div className="mb-6 flex flex-wrap gap-2">
-        {TABS.map((g) => (
-          <button
-            key={g}
-            type="button"
-            onClick={() => {
-              setGenre(g);
-              setSelectedIds(new Set());
-            }}
-            className={`pill px-4 py-2 text-sm transition ${
-              genre === g
-                ? "bg-accent text-background"
-                : "bg-surface/80 text-muted hover:bg-surface-2 hover:text-foreground"
-            }`}
-          >
-            {GENRE_LABELS[g]}
-            <span className="ml-2 opacity-70">{counts[g]}</span>
-          </button>
-        ))}
-      </div>
+      <div
+        className={`collapse-panel ${isImportOpen ? "is-open" : ""} ${
+          importCanAnimate ? "can-animate" : ""
+        }`}
+        aria-hidden={!isImportOpen}
+      >
+        <div className="collapse-panel-inner">
+          <div className="space-y-6">
+            <section className="panel p-4">
+              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
+                Link Spotify playlist → {GENRE_LABELS[genre]}
+              </h2>
+              <p className="mb-3 text-xs text-muted">
+                All tracks from the playlist are tagged as{" "}
+                <strong className="text-foreground">{GENRE_LABELS[genre]}</strong>.
+                Switch the tab above before importing vals / milonga / tango
+                lists.
+              </p>
+              {playlistsError && (
+                <p className="mb-2 text-xs text-warn">{playlistsError}</p>
+              )}
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <select
+                  value={selectedPlaylistId}
+                  onChange={(e) => {
+                    setSelectedPlaylistId(e.target.value);
+                    if (e.target.value) setPlaylistUrl("");
+                  }}
+                  className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                  disabled={loadingPlaylists}
+                >
+                  <option value="">
+                    {loadingPlaylists
+                      ? "Loading your playlists…"
+                      : "Pick one of your playlists"}
+                  </option>
+                  {playlists.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.tracksTotal > 0 ? ` (${p.tracksTotal})` : ""}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={playlistUrl}
+                  onChange={(e) => {
+                    setPlaylistUrl(e.target.value);
+                    if (e.target.value) setSelectedPlaylistId("");
+                  }}
+                  placeholder="…or paste open.spotify.com/playlist/…"
+                  className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={() => void importPlaylist()}
+                  disabled={importing}
+                  className="pill shrink-0 bg-accent px-4 py-2 text-sm font-semibold text-background hover:bg-accent-hover disabled:opacity-50"
+                >
+                  {importing ? "Importing…" : "Import playlist"}
+                </button>
+              </div>
+            </section>
 
-      <section className="panel mb-6 p-4">
-        <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
-          Link Spotify playlist → {GENRE_LABELS[genre]}
-        </h2>
-        <p className="mb-3 text-xs text-muted">
-          All tracks from the playlist are tagged as{" "}
-          <strong className="text-foreground">{GENRE_LABELS[genre]}</strong>. Switch
-          the tab above before importing vals / milonga / tango lists.
-        </p>
-        {playlistsError && (
-          <p className="mb-2 text-xs text-warn">{playlistsError}</p>
-        )}
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <select
-            value={selectedPlaylistId}
-            onChange={(e) => {
-              setSelectedPlaylistId(e.target.value);
-              if (e.target.value) setPlaylistUrl("");
-            }}
-            className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-            disabled={loadingPlaylists}
-          >
-            <option value="">
-              {loadingPlaylists
-                ? "Loading your playlists…"
-                : "Pick one of your playlists"}
-            </option>
-            {playlists.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.tracksTotal > 0 ? ` (${p.tracksTotal})` : ""}
-              </option>
-            ))}
-          </select>
-          <input
-            value={playlistUrl}
-            onChange={(e) => {
-              setPlaylistUrl(e.target.value);
-              if (e.target.value) setSelectedPlaylistId("");
-            }}
-            placeholder="…or paste open.spotify.com/playlist/…"
-            className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-          />
-          <button
-            type="button"
-            onClick={() => void importPlaylist()}
-            disabled={importing}
-            className="pill shrink-0 bg-accent px-4 py-2 text-sm font-semibold text-background hover:bg-accent-hover disabled:opacity-50"
-          >
-            {importing ? "Importing…" : "Import playlist"}
-          </button>
-        </div>
-      </section>
-
-      {(supportsLocal || supportsFilePick) && (
-        <section className="panel mb-6 p-4">
-          <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
-            Add local files → {GENRE_LABELS[genre]}
-          </h2>
-          <p className="mb-3 text-xs text-muted">
-            For a loose folder of MP3s (like cortina soundboard files), use these
-            buttons — they tag everything as{" "}
-            <strong className="text-foreground">{GENRE_LABELS[genre]}</strong>.
-          </p>
-          <div className="mb-3 flex flex-wrap gap-2">
-            {supportsFilePick && (
-              <button
-                type="button"
-                onClick={() => void onImportLocalFiles()}
-                className="pill border border-border bg-surface-2 px-4 py-2 text-sm hover:border-accent"
-              >
-                Add local file(s)
-              </button>
-            )}
             {supportsLocal && (
-              <button
-                type="button"
-                onClick={() => void onImportFlatFolder()}
-                className="pill border border-border bg-surface-2 px-4 py-2 text-sm hover:border-accent"
-              >
-                Import folder into {GENRE_LABELS[genre]}
-              </button>
-            )}
-          </div>
-          <details className="text-xs text-muted">
-            <summary className="cursor-pointer text-foreground/80 hover:text-accent">
-              Structured library layout (optional)
-            </summary>
-            <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2/80 p-3 text-[11px] leading-relaxed text-muted">
+              <section className="panel p-4">
+                <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
+                  Add local files → {GENRE_LABELS[genre]}
+                </h2>
+                <p className="mb-3 text-xs text-muted">
+                  Import a folder of MP3s into{" "}
+                  <strong className="text-foreground">
+                    {GENRE_LABELS[genre]}
+                  </strong>
+                  , or link a structured library that already has genre
+                  subfolders.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onImportFlatFolder()}
+                    className="pill border border-border bg-surface-2 px-4 py-2 text-sm hover:border-accent"
+                  >
+                    Import folder
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onImportStructuredFolder()}
+                    className="pill border border-border bg-surface/70 px-4 py-2 text-sm text-muted transition hover:border-accent hover:text-accent"
+                    title="Expects MyTango/Tango|Vals|Milonga|Cortina"
+                  >
+                    {folderLinked
+                      ? "Rescan structured library"
+                      : "Link structured library"}
+                  </button>
+                </div>
+                <details className="mt-3 text-xs text-muted">
+                  <summary className="cursor-pointer text-foreground/80 hover:text-accent">
+                    What is a structured library?
+                  </summary>
+                  <p className="mt-2">
+                    Optional: one root folder with genre subfolders. Genres come
+                    from folder names (not the active tab):
+                  </p>
+                  <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2/80 p-3 text-[11px] leading-relaxed text-muted">
 {`MyTango/
-  Tango/     ← .mp3 / .flac / .wav …
+  Tango/
   Vals/
   Milonga/
   Cortina/`}
-            </pre>
-            <p className="mt-2">
-              Use <em>Link structured library</em> at the top for that layout.
-              A flat folder like <code className="text-foreground">obiad/</code>{" "}
-              with only MP3s should use <em>Import folder into {GENRE_LABELS[genre]}</em>{" "}
-              instead.
-            </p>
-          </details>
-        </section>
-      )}
+                  </pre>
+                </details>
+              </section>
+            )}
 
-      <section className="panel mb-6 p-4">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
-          Add single track from Spotify
-        </h2>
-        <div className="flex flex-wrap gap-2">
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void onSearch()}
-            placeholder={`Search Spotify for ${GENRE_LABELS[genre]}…`}
-            className="min-w-[240px] flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-          />
-          <button
-            type="button"
-            onClick={() => void onSearch()}
-            disabled={searching}
-            className="pill bg-surface-2 px-4 py-2 text-sm font-medium text-foreground hover:bg-border disabled:opacity-50"
-          >
-            {searching ? "Searching…" : "Search"}
-          </button>
-        </div>
-        {results.length > 0 && (
-          <ul className="mt-4 max-h-64 space-y-2 overflow-y-auto">
-            {results.map((r) => (
-              <li
-                key={r.id}
-                className="flex items-center justify-between gap-3 rounded-xl bg-surface-2/80 px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{r.name}</p>
-                  <p className="truncate text-xs text-muted">
-                    {r.artists.map((a) => a.name).join(", ")}
-                  </p>
-                </div>
+            <section className="panel p-4">
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
+                Add single track from Spotify
+              </h2>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && void onSearch()}
+                  placeholder={`Search Spotify for ${GENRE_LABELS[genre]}…`}
+                  className="min-w-[240px] flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
+                />
                 <button
                   type="button"
-                  onClick={() => void addSpotifyTrack(r)}
-                  className="shrink-0 text-sm text-accent hover:text-accent-hover"
+                  onClick={() => void onSearch()}
+                  disabled={searching}
+                  className="pill bg-surface-2 px-4 py-2 text-sm font-medium text-foreground hover:bg-border disabled:opacity-50"
                 >
-                  Add
+                  {searching ? "Searching…" : "Search"}
                 </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+              </div>
+              {results.length > 0 && (
+                <ul className="mt-4 max-h-64 space-y-2 overflow-y-auto">
+                  {results.map((r) => (
+                    <li
+                      key={r.id}
+                      className="flex items-center justify-between gap-3 rounded-xl bg-surface-2/80 px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{r.name}</p>
+                        <p className="truncate text-xs text-muted">
+                          {r.artists.map((a) => a.name).join(", ")}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void addSpotifyTrack(r)}
+                        className="shrink-0 text-sm text-accent hover:text-accent-hover"
+                      >
+                        Add
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        </div>
+      </div>
 
       {message && (
         <p

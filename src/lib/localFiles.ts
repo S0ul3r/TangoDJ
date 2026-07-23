@@ -2,10 +2,10 @@
  * File System Access API helpers for local audio.
  *
  * Two import modes:
- * 1) Structured library root (Link local music folder):
+ * 1) Structured library root:
  *      MyTango/
  *        Tango/   Vals/   Milonga/   Cortina/
- * 2) Flat import into the active genre (files or one folder of mp3s).
+ * 2) Flat folder import into the active genre.
  */
 
 import type { Genre } from "@/types/domain";
@@ -28,10 +28,6 @@ const STORE_FILES = "file_handles";
 
 export function supportsFileSystemAccess(): boolean {
   return typeof window !== "undefined" && "showDirectoryPicker" in window;
-}
-
-export function supportsFilePicker(): boolean {
-  return typeof window !== "undefined" && "showOpenFilePicker" in window;
 }
 
 function openHandleDb(): Promise<IDBDatabase> {
@@ -131,22 +127,6 @@ export async function pickFlatAudioFolder(): Promise<FileSystemDirectoryHandle> 
   return (await window.showDirectoryPicker({
     mode: "read",
   })) as FileSystemDirectoryHandle;
-}
-
-export async function pickAudioFiles(): Promise<FileSystemFileHandle[]> {
-  // @ts-expect-error File System Access API
-  const handles = (await window.showOpenFilePicker({
-    multiple: true,
-    types: [
-      {
-        description: "Audio",
-        accept: {
-          "audio/*": [".mp3", ".m4a", ".wav", ".flac", ".ogg"],
-        },
-      },
-    ],
-  })) as FileSystemFileHandle[];
-  return handles;
 }
 
 export async function persistFileHandle(

@@ -84,6 +84,21 @@ export function validateQueue(
           });
         }
       }
+      const prev = items[i - 1];
+      if (prev?.type === "cortina") {
+        issues.push({
+          code: "cortina_after_cortina",
+          message: `Two cortinas in a row at #${i}–${i + 1}. Pattern must be tanda → cortina.`,
+          itemIndex: i,
+        });
+      }
+      if (i === 0) {
+        issues.push({
+          code: "starts_with_cortina",
+          message: "Queue should start with a tanda, not a cortina.",
+          itemIndex: i,
+        });
+      }
     }
   }
 
@@ -130,6 +145,8 @@ export function validateQueue(
     "missing_cortina",
     "cortina_genre",
     "tanda_needs_cortina",
+    "cortina_after_cortina",
+    "starts_with_cortina",
     "fast_after_fast",
   ]);
   const ok = !issues.some((i) => hardCodes.has(i.code));
@@ -184,9 +201,9 @@ export function autoGenerateNight(
   };
 
   const used = new Set<string>();
+  const usedCortinas = new Set<string>();
   const items: EventQueueItem[] = [];
   const genresUsed: TandaGenre[] = [];
-  let cortinaIdx = 0;
 
   const pick = (genre: TandaGenre): Tanda | null => {
     const pool = pools[genre].filter((t) => !used.has(t.id));
@@ -198,6 +215,14 @@ export function autoGenerateNight(
     const tanda = pool[0];
     used.add(tanda.id);
     return tanda;
+  };
+
+  const pickCortina = (): Track | null => {
+    const unused = cortinaTracks.filter((c) => !usedCortinas.has(c.id));
+    if (unused.length === 0) return null;
+    const cortina = unused[Math.floor(Math.random() * unused.length)];
+    usedCortinas.add(cortina.id);
+    return cortina;
   };
 
   for (let n = 0; n < maxTandas; n++) {
@@ -223,12 +248,28 @@ export function autoGenerateNight(
     genresUsed.push(tanda.genre);
     items.push({ id: newId(), type: "tanda", tandaId: tanda.id });
 
-    const cortina = cortinaTracks[cortinaIdx % cortinaTracks.length];
-    cortinaIdx += 1;
-    items.push({ id: newId(), type: "cortina", trackId: cortina.id });
+    const cortina = pickCortina();
+    if (cortina) {
+      items.push({ id: newId(), type: "cortina", trackId: cortina.id });
+    }
   }
 
   return items;
+}
+
+/** Pick a random cortina not already used in the event queue. */
+export function pickUnusedCortina(
+  cortinaTracks: Track[],
+  items: EventQueueItem[]
+): Track | null {
+  const used = new Set(
+    items
+      .filter((i) => i.type === "cortina" && i.trackId)
+      .map((i) => i.trackId as string)
+  );
+  const unused = cortinaTracks.filter((c) => !used.has(c.id));
+  if (unused.length === 0) return null;
+  return unused[Math.floor(Math.random() * unused.length)];
 }
 
 export function genreOfQueueItem(

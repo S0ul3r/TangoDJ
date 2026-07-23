@@ -7,6 +7,7 @@ import { useLibrary } from "@/context/LibraryContext";
 import { usePlayback } from "@/context/PlaybackContext";
 import {
   autoGenerateNight,
+  pickUnusedCortina,
   validateQueue,
 } from "@/lib/domain/sequencing";
 import type {
@@ -14,6 +15,15 @@ import type {
   MilongaEvent,
   TandaGenre,
 } from "@/types/domain";
+
+const AUTO_CORTINA_KEY = "tangodj.autoAddCortina";
+
+function readAutoCortina(): boolean {
+  if (typeof window === "undefined") return true;
+  const raw = localStorage.getItem(AUTO_CORTINA_KEY);
+  if (raw === null) return true;
+  return raw === "1";
+}
 
 export default function EventsPage() {
   const router = useRouter();
@@ -25,6 +35,10 @@ export default function EventsPage() {
   const [name, setName] = useState("Tonight");
   const [items, setItems] = useState<EventQueueItem[]>([]);
   const [maxTandas, setMaxTandas] = useState(12);
+  const [autoAddCortina, setAutoAddCortina] = useState(readAutoCortina);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
 
   const tracksById = useMemo(
     () => new Map(tracks.map((t) => [t.id, t])),
@@ -38,6 +52,36 @@ export default function EventsPage() {
   const validation = validateQueue(items, tandasById, tracksById);
   const cortinas = tracksByGenre("cortina");
 
+  const usedTandaIds = useMemo(
+    () =>
+      new Set(
+        items
+          .filter((i) => i.type === "tanda" && i.tandaId)
+          .map((i) => i.tandaId as string)
+      ),
+    [items]
+  );
+
+  const usedCortinaIds = useMemo(
+    () =>
+      new Set(
+        items
+          .filter((i) => i.type === "cortina" && i.trackId)
+          .map((i) => i.trackId as string)
+      ),
+    [items]
+  );
+
+  const showNotice = (msg: string) => {
+    setNotice(msg);
+    window.setTimeout(() => setNotice(null), 3500);
+  };
+
+  const setAutoCortina = (on: boolean) => {
+    setAutoAddCortina(on);
+    localStorage.setItem(AUTO_CORTINA_KEY, on ? "1" : "0");
+  };
+
   const startNew = () => {
     setEditingId(null);
     setName("Tonight");
@@ -50,23 +94,67 @@ export default function EventsPage() {
     setItems(event.items.map((i) => ({ ...i })));
   };
 
-  const addTanda = (tandaId: string) => {
-    const next: EventQueueItem[] = [
-      ...items,
-      { id: crypto.randomUUID(), type: "tanda", tandaId },
-    ];
-    const lastCortina = cortinas[0];
-    if (lastCortina) {
-      next.push({
-        id: crypto.randomUUID(),
-        type: "cortina",
-        trackId: lastCortina.id,
-      });
+  const appendTrailingCortinaIfNeeded = (
+    queue: EventQueueItem[]
+  ): EventQueueItem[] => {
+    if (!autoAddCortina) return queue;
+    const next = [...queue];
+    const last = next[next.length - 1];
+    if (last?.type === "tanda") {
+      const cortina = pickUnusedCortina(cortinas, next);
+      if (cortina) {
+        next.push({
+          id: crypto.randomUUID(),
+          type: "cortina",
+          trackId: cortina.id,
+        });
+      }
     }
-    setItems(next);
+    return next;
+  };
+
+  const addTanda = (tandaId: string) => {
+    setItems((prev) => {
+      const next = appendTrailingCortinaIfNeeded([...prev]);
+      next.push({ id: crypto.randomUUID(), type: "tanda", tandaId });
+      if (autoAddCortina) {
+        const cortina = pickUnusedCortina(cortinas, next);
+        if (cortina) {
+          next.push({
+            id: crypto.randomUUID(),
+            type: "cortina",
+            trackId: cortina.id,
+          });
+        } else if (cortinas.length > 0) {
+          queueMicrotask(() =>
+            showNotice(
+              "Tanda added, but no unused cortina left to auto-attach."
+            )
+          );
+        }
+      }
+      return next;
+    });
   };
 
   const addCortina = (trackId: string) => {
+    const last = items[items.length - 1];
+    if (last?.type === "cortina") {
+      showNotice(
+        "Cannot add cortina: the queue already ends with a cortina. Add a tanda first (pattern is tanda → cortina)."
+      );
+      return;
+    }
+    if (items.length === 0) {
+      showNotice("Cannot add cortina: the queue should start with a tanda.");
+      return;
+    }
+    if (items.some((i) => i.type === "cortina" && i.trackId === trackId)) {
+      showNotice(
+        "Cannot add cortina: that song is already used in this event."
+      );
+      return;
+    }
     setItems((prev) => [
       ...prev,
       { id: crypto.randomUUID(), type: "cortina", trackId },
@@ -83,6 +171,18 @@ export default function EventsPage() {
       const j = index + dir;
       if (j < 0 || j >= next.length) return prev;
       [next[index], next[j]] = [next[j], next[index]];
+      return next;
+    });
+  };
+
+  const reorder = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0) return;
+    setItems((prev) => {
+      if (from >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      const insertAt = from < to ? to - 1 : to;
+      next.splice(Math.max(0, Math.min(insertAt, next.length)), 0, moved);
       return next;
     });
   };
@@ -127,16 +227,39 @@ export default function EventsPage() {
   const tandasByGenre = (g: TandaGenre) =>
     tandas.filter((t) => t.genre === g);
 
+  const onDragStart = (index: number) => (e: React.DragEvent) => {
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(index));
+  };
+
+  const onDragOverGap = (index: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDropIndex(index);
+  };
+
+  const onDropGap = (index: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    const from = Number(e.dataTransfer.getData("text/plain"));
+    if (Number.isFinite(from)) reorder(from, index);
+    setDragIndex(null);
+    setDropIndex(null);
+  };
+
+  const onDragEnd = () => {
+    setDragIndex(null);
+    setDropIndex(null);
+  };
+
   return (
     <AppShell>
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Events</h1>
-          <p className="mt-1 text-muted">
-            Night order: tanda → cortina, no fast-after-fast, prefer two tangos
-            between vals/milonga.
-          </p>
-        </div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        {notice ? (
+          <p className="text-sm text-warn">{notice}</p>
+        ) : (
+          <span />
+        )}
         <button
           type="button"
           onClick={startNew}
@@ -155,7 +278,7 @@ export default function EventsPage() {
             className="mb-4 w-full rounded border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
           />
 
-          <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
             <label className="text-xs text-muted">Auto-generate</label>
             <input
               type="number"
@@ -173,48 +296,97 @@ export default function EventsPage() {
             >
               Fill from pool
             </button>
+            <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={autoAddCortina}
+                onChange={(e) => setAutoCortina(e.target.checked)}
+                className="accent-[var(--accent)]"
+              />
+              Auto-add cortina with tanda
+            </label>
           </div>
 
-          <ul className="mb-4 min-h-[200px] space-y-1">
+          <ul className="mb-4 min-h-[200px]">
             {items.length === 0 && (
               <li className="text-sm text-muted">Queue is empty.</li>
             )}
             {items.map((item, index) => (
-              <li
-                key={item.id}
-                className="flex items-center gap-2 rounded bg-surface-2 px-3 py-2 text-sm"
-              >
-                <span className="w-6 text-xs text-muted">{index + 1}</span>
-                <span
-                  className={`flex-1 truncate ${
-                    item.type === "cortina" ? "text-muted" : "font-medium"
+              <li key={item.id} className="list-none">
+                <div
+                  className={`queue-drop-gap ${
+                    dropIndex === index && dragIndex !== null ? "is-active" : ""
+                  }`}
+                  onDragOver={onDragOverGap(index)}
+                  onDrop={onDropGap(index)}
+                />
+                <div
+                  draggable
+                  onDragStart={onDragStart(index)}
+                  onDragEnd={onDragEnd}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const mid = rect.top + rect.height / 2;
+                    setDropIndex(e.clientY < mid ? index : index + 1);
+                  }}
+                  className={`queue-row flex items-center gap-1 rounded bg-surface-2 px-3 py-1.5 text-sm ${
+                    dragIndex === index ? "is-dragging" : ""
                   }`}
                 >
-                  {labelFor(item)}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => move(index, -1)}
-                  className="text-xs text-muted hover:text-foreground"
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => move(index, 1)}
-                  className="text-xs text-muted hover:text-foreground"
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  onClick={() => removeAt(index)}
-                  className="text-xs text-bad"
-                >
-                  ×
-                </button>
+                  <span
+                    className="mr-1 select-none text-muted"
+                    title="Drag to reorder"
+                    aria-hidden
+                  >
+                    ⋮⋮
+                  </span>
+                  <span className="w-6 text-xs text-muted">{index + 1}</span>
+                  <span
+                    className={`flex-1 truncate ${
+                      item.type === "cortina" ? "text-muted" : "font-medium"
+                    }`}
+                  >
+                    {labelFor(item)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => move(index, -1)}
+                    className="flex h-7 w-7 items-center justify-center rounded text-base text-muted hover:bg-surface hover:text-foreground"
+                    aria-label="Move up"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => move(index, 1)}
+                    className="flex h-7 w-7 items-center justify-center rounded text-base text-muted hover:bg-surface hover:text-foreground"
+                    aria-label="Move down"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeAt(index)}
+                    className="flex h-7 w-7 items-center justify-center rounded text-lg text-bad hover:bg-surface"
+                    aria-label="Remove"
+                  >
+                    ×
+                  </button>
+                </div>
               </li>
             ))}
+            {items.length > 0 && (
+              <div
+                className={`queue-drop-gap ${
+                  dropIndex === items.length && dragIndex !== null
+                    ? "is-active"
+                    : ""
+                }`}
+                onDragOver={onDragOverGap(items.length)}
+                onDrop={onDropGap(items.length)}
+              />
+            )}
           </ul>
 
           <div
@@ -266,17 +438,33 @@ export default function EventsPage() {
               <div key={g} className="mb-3">
                 <p className="mb-1 text-xs uppercase text-muted">{g}</p>
                 <ul className="space-y-1">
-                  {tandasByGenre(g).map((t) => (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        onClick={() => addTanda(t.id)}
-                        className="w-full rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2"
-                      >
-                        {t.name}
-                      </button>
-                    </li>
-                  ))}
+                  {tandasByGenre(g).map((t) => {
+                    const alreadyIn = usedTandaIds.has(t.id);
+                    return (
+                      <li key={t.id}>
+                        <button
+                          type="button"
+                          onClick={() => addTanda(t.id)}
+                          className="flex w-full items-center gap-2 rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2"
+                        >
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-accent-soft text-xs font-semibold text-accent">
+                            +
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">
+                            {t.name}
+                          </span>
+                          {alreadyIn && (
+                            <span
+                              className="shrink-0 text-[10px] uppercase tracking-wide text-warn"
+                              title="This tanda is already in the event"
+                            >
+                              ⚠ in event
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
                   {tandasByGenre(g).length === 0 && (
                     <li className="text-xs text-muted">None</li>
                   )}
@@ -290,17 +478,29 @@ export default function EventsPage() {
               Add cortina
             </h2>
             <ul className="max-h-40 space-y-1 overflow-y-auto">
-              {cortinas.map((c) => (
-                <li key={c.id}>
-                  <button
-                    type="button"
-                    onClick={() => addCortina(c.id)}
-                    className="w-full rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2"
-                  >
-                    {c.name}
-                  </button>
-                </li>
-              ))}
+              {cortinas.map((c) => {
+                const used = usedCortinaIds.has(c.id);
+                return (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      onClick={() => addCortina(c.id)}
+                      disabled={used}
+                      className="flex w-full items-center gap-2 rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-accent-soft text-xs font-semibold text-accent">
+                        +
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">{c.name}</span>
+                      {used && (
+                        <span className="shrink-0 text-[10px] text-muted">
+                          used
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
               {cortinas.length === 0 && (
                 <li className="text-xs text-muted">Add cortinas in Library.</li>
               )}

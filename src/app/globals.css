@@ -132,7 +132,122 @@ h3 {
   animation: pulse-soft 2.2s ease-in-out infinite;
 }
 
+/* Smooth expand/collapse for library import tools (motion only when .can-animate) */
+.collapse-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin-bottom: 0;
+}
+
+.collapse-panel.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  margin-bottom: 1.5rem;
+}
+
+.collapse-panel.can-animate {
+  transition:
+    grid-template-rows 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.28s ease,
+    margin-bottom 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.collapse-panel-inner {
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.collapse-panel.is-open .collapse-panel-inner {
+  pointer-events: auto;
+}
+
+.collapse-panel-inner > * {
+  transform: translateY(-6px);
+}
+
+.collapse-panel.is-open .collapse-panel-inner > * {
+  transform: translateY(0);
+}
+
+.collapse-panel.can-animate .collapse-panel-inner > * {
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Vertical sticky card stack (business-card holder) for saved tandas */
+.tanda-card-stack {
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-snap-type: y proximity;
+  padding-bottom: 2rem;
+}
+
+.tanda-card-stack > li {
+  position: sticky;
+  scroll-snap-align: start;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tanda-card-stack > li:nth-child(1) {
+  top: 0;
+  z-index: 1;
+}
+.tanda-card-stack > li:nth-child(2) {
+  top: 0.35rem;
+  z-index: 2;
+}
+.tanda-card-stack > li:nth-child(3) {
+  top: 0.7rem;
+  z-index: 3;
+}
+.tanda-card-stack > li:nth-child(n + 4) {
+  top: 1.05rem;
+  z-index: 4;
+}
+
+.tanda-card-stack > li:hover {
+  z-index: 20;
+}
+
+/* Events queue drag-and-drop */
+.queue-drop-gap {
+  height: 0.2rem;
+  margin: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  transition:
+    height 0.18s ease,
+    margin 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.queue-drop-gap.is-active {
+  height: 2.25rem;
+  margin: 0.2rem 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.queue-row {
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease,
+    box-shadow 0.15s ease;
+  cursor: grab;
+}
+
+.queue-row:active {
+  cursor: grabbing;
+}
+
+.queue-row.is-dragging {
+  opacity: 0.45;
+  transform: scale(0.98);
 }
