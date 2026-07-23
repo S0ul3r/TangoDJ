@@ -63,6 +63,14 @@ const DEFAULT_GAP_SECONDS = 2;
 const CORTINA_FADE_MS = 6000;
 /** Advance when this much of the track remains (ms). */
 const END_EPSILON_MS = 100;
+/**
+ * Spotify metadata duration is sometimes longer than the real audio
+ * (e.g. listed 2:57, audio ends ~2:50). After a jump to 0:00 / stop,
+ * wait this long before treating it as end-of-track.
+ */
+const PREMATURE_END_CONFIRM_MS = 2500;
+/** Need at least this much playback before premature-end logic can fire. */
+const MIN_PEAK_FOR_PREMATURE_MS = 20_000;
 
 function flattenTracksForItem(
   item: EventQueueItem,
@@ -121,6 +129,15 @@ export class QueueController {
   private endTimer: ReturnType<typeof setTimeout> | null = null;
   /** While true, keep Spotify/local at 0 until the next track is actually started. */
   private holdSilent = false;
+  /** Wall-clock when we last issued a play for the current cursor. */
+  private playIssuedAt = 0;
+  /** True once Spotify reported is_playing for the current track. */
+  private confirmedPlaying = false;
+  private stuckRetryDone = false;
+  /** Highest progress seen for current track (to detect abrupt 0:00 end). */
+  private peakProgressMs = 0;
+  /** When set, we saw a premature stop and are confirming before advance. */
+  private prematureEndSince: number | null = null;
 
   constructor(private deps: QueueControllerDeps) {
     this.local.setEndedHandler(() => {
@@ -281,7 +298,13 @@ export class QueueController {
       this.local.pause();
     } else if (this.activeSource === "spotify") {
       const token = await this.deps.getAccessToken();
-      if (token) await pausePlayback(token, this.deps.getDeviceId());
+      if (token) {
+        try {
+          await pausePlayback(token, this.deps.getDeviceId());
+        } catch {
+          /* Restriction violated / no active device — still mark paused locally */
+        }
+      }
     }
     this.status = "paused";
     this.notify();
@@ -290,9 +313,26 @@ export class QueueController {
   async resume(): Promise<void> {
     if (this.activeSource === "local") {
       await this.local.resume();
-    } else if (this.activeSource === "spotify") {
+      this.status = "playing";
+      this.scheduleCortinaCutIfNeeded();
+      this.notify();
+      return;
+    }
+    if (this.activeSource === "spotify") {
       const token = await this.deps.getAccessToken();
-      if (token) await resumePlayback(token, this.deps.getDeviceId());
+      if (token) {
+        try {
+          const ok = await resumePlayback(token, this.deps.getDeviceId());
+          if (!ok) {
+            // Nothing to resume (stuck/idle) — re-issue play for current track
+            await this.play();
+            return;
+          }
+        } catch {
+          await this.play();
+          return;
+        }
+      }
     }
     this.status = "playing";
     this.scheduleCortinaCutIfNeeded();
@@ -300,9 +340,16 @@ export class QueueController {
   }
 
   async togglePlayPause(): Promise<void> {
-    if (this.status === "playing") await this.pause();
-    else if (this.status === "paused") await this.resume();
-    else await this.play();
+    try {
+      if (this.status === "playing") await this.pause();
+      else if (this.status === "paused") await this.resume();
+      else await this.play();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Playback control failed";
+      this.error = msg;
+      this.deps.onError?.(msg);
+      this.notify();
+    }
   }
 
   /** Next song in tanda; at last track or on cortina → next queue item. */
@@ -510,6 +557,11 @@ export class QueueController {
     this.nearEndSeen = false;
     this.fading = false;
     this.expectedSpotifyUri = null;
+    this.playIssuedAt = 0;
+    this.confirmedPlaying = false;
+    this.stuckRetryDone = false;
+    this.peakProgressMs = 0;
+    this.prematureEndSince = null;
 
     if (track.source === "spotify" && this.activeSource === "local") {
       this.local.stop();
@@ -707,6 +759,11 @@ export class QueueController {
     this.activeSource = "spotify";
     this.expectedSpotifyUri = track.spotifyUri;
     this.liveAlbumArtUrl = track.albumArtUrl ?? null;
+    this.playIssuedAt = Date.now();
+    this.confirmedPlaying = false;
+    this.stuckRetryDone = false;
+    this.peakProgressMs = 0;
+    this.prematureEndSince = null;
 
     if (startSilent) {
       await this.waitForSpotifyUri(token, track.spotifyUri);
@@ -767,7 +824,6 @@ export class QueueController {
 
   private startSpotifyPoll() {
     this.stopSpotifyPoll();
-    let sawPlaying = false;
     this.nearEndSeen = false;
 
     this.pollTimer = setInterval(() => {
@@ -783,13 +839,44 @@ export class QueueController {
           const token = await this.deps.getAccessToken();
           if (!token) return;
           const state = await getPlaybackState(token);
-          if (!state) return;
+          const deviceId = this.deps.getDeviceId();
+          const item = this.items[this.cursor.queueIndex];
+
+          // No active Spotify session — treat as end if we already played near the end
+          if (!state) {
+            if (this.nearEndSeen) {
+              this.clearEndTimer();
+              this.nearEndSeen = false;
+              this.prematureEndSince = null;
+              await this.onNaturalTrackEnd();
+              return;
+            }
+            if (
+              this.confirmedPlaying &&
+              this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS
+            ) {
+              if (this.prematureEndSince == null) {
+                this.prematureEndSince = Date.now();
+              } else if (
+                Date.now() - this.prematureEndSince >=
+                PREMATURE_END_CONFIRM_MS
+              ) {
+                this.prematureEndSince = null;
+                this.clearEndTimer();
+                await this.onNaturalTrackEnd();
+              }
+            }
+            return;
+          }
 
           const uri = state.item?.uri ?? null;
           const progress = state.progress_ms ?? 0;
-          const duration = state.item?.duration_ms ?? 0;
+          const duration =
+            state.item?.duration_ms ??
+            (this.durationMs > 0 ? this.durationMs : 0);
           this.progressMs = progress;
           if (duration > 0) this.durationMs = duration;
+          if (progress > this.peakProgressMs) this.peakProgressMs = progress;
 
           const art =
             state.item?.album?.images?.[0]?.url ??
@@ -808,20 +895,131 @@ export class QueueController {
             this.baseVolume = Math.min(100, Math.max(0, deviceVol));
           }
 
-          if (state.is_playing) sawPlaying = true;
+          if (state.is_playing && progress > 500) {
+            this.confirmedPlaying = true;
+          }
 
-          const item = this.items[this.cursor.queueIndex];
+          const uriMatches =
+            !this.expectedSpotifyUri ||
+            !uri ||
+            uri === this.expectedSpotifyUri;
 
-          // Same URI restarted from the beginning after near-end → repeat was on
+          // Stuck at 0:00 — play accepted but device never started (restricted / flaky)
+          if (
+            uriMatches &&
+            !state.is_playing &&
+            progress < 1500 &&
+            !this.confirmedPlaying &&
+            this.playIssuedAt > 0 &&
+            Date.now() - this.playIssuedAt > 3500
+          ) {
+            if (!this.stuckRetryDone && this.expectedSpotifyUri) {
+              this.stuckRetryDone = true;
+              this.playIssuedAt = Date.now();
+              try {
+                await playUris(
+                  token,
+                  [this.expectedSpotifyUri],
+                  deviceId
+                );
+              } catch (e) {
+                const msg =
+                  e instanceof Error ? e.message : "Spotify play failed";
+                this.error = msg;
+                this.deps.onError?.(
+                  `${msg} — skipping unplayable track.`
+                );
+                this.clearEndTimer();
+                await this.onNaturalTrackEnd();
+              }
+              return;
+            }
+            if (Date.now() - this.playIssuedAt > 3500) {
+              this.deps.onError?.(
+                "Spotify did not start this track — skipping."
+              );
+              this.clearEndTimer();
+              await this.onNaturalTrackEnd();
+              return;
+            }
+          }
+
+          // Same URI restarted from the beginning after near-end (repeat / auto-restart)
           if (
             this.nearEndSeen &&
-            uri &&
-            this.expectedSpotifyUri &&
-            uri === this.expectedSpotifyUri &&
+            uriMatches &&
             progress < 2500 &&
-            sawPlaying
+            this.confirmedPlaying
           ) {
             this.nearEndSeen = false;
+            this.prematureEndSince = null;
+            this.clearEndTimer();
+            await this.onNaturalTrackEnd();
+            return;
+          }
+
+          // Metadata longer than real audio (e.g. 2:57 listed, ends ~2:50):
+          // peak is close to true end but not within a few seconds of duration.
+          const closeToListedEnd =
+            duration > 0 &&
+            this.peakProgressMs >= Math.max(0, duration - 12_000);
+          if (
+            this.confirmedPlaying &&
+            uriMatches &&
+            progress < 2000 &&
+            closeToListedEnd
+          ) {
+            this.nearEndSeen = false;
+            this.prematureEndSince = null;
+            this.clearEndTimer();
+            await this.onNaturalTrackEnd();
+            return;
+          }
+
+          // Premature stop / jump-to-0: confirm silence, then advance (gap applies in onNaturalTrackEnd)
+          const jumpedToStart =
+            this.confirmedPlaying &&
+            uriMatches &&
+            progress < 2000 &&
+            this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS &&
+            this.peakProgressMs - progress > 15_000;
+          const stoppedWithTimeLeft =
+            this.confirmedPlaying &&
+            uriMatches &&
+            !state.is_playing &&
+            this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS &&
+            duration > 0 &&
+            duration - progress > 5000 &&
+            progress >= 5000;
+
+          if (jumpedToStart || stoppedWithTimeLeft) {
+            if (this.prematureEndSince == null) {
+              this.prematureEndSince = Date.now();
+            } else if (
+              Date.now() - this.prematureEndSince >=
+              PREMATURE_END_CONFIRM_MS
+            ) {
+              this.prematureEndSince = null;
+              this.nearEndSeen = false;
+              this.clearEndTimer();
+              await this.onNaturalTrackEnd();
+              return;
+            }
+          } else if (state.is_playing && progress > 3000) {
+            this.prematureEndSince = null;
+          }
+
+          // Finished: Spotify stops near end (progress still high)
+          if (
+            this.confirmedPlaying &&
+            !state.is_playing &&
+            uriMatches &&
+            this.nearEndSeen &&
+            duration > 0 &&
+            progress >= duration - 2000
+          ) {
+            this.nearEndSeen = false;
+            this.prematureEndSince = null;
             this.clearEndTimer();
             await this.onNaturalTrackEnd();
             return;
@@ -839,32 +1037,40 @@ export class QueueController {
             return;
           }
 
-          if (duration > 0 && progress > 0) {
+          if (duration > 0) {
             const remaining = duration - progress;
-            if (remaining <= END_EPSILON_MS) {
+            // progress can be 0 at true end — still treat as finished if we were near end
+            if (
+              remaining <= END_EPSILON_MS ||
+              (progress === 0 &&
+                this.nearEndSeen &&
+                this.confirmedPlaying &&
+                !state.is_playing)
+            ) {
               this.nearEndSeen = false;
               this.clearEndTimer();
               await this.onNaturalTrackEnd();
               return;
-            }
-            // Schedule exact cut ~0.1s before end (don't cut 1–3s early)
-            if (remaining < 2500) {
-              this.nearEndSeen = true;
-              if (!this.endTimer) this.schedulePreciseEnd(remaining);
-            } else {
-              this.nearEndSeen = false;
-              this.clearEndTimer();
             }
 
-            // Track fully stopped near the end
-            if (
-              sawPlaying &&
-              !state.is_playing &&
-              remaining < 500
-            ) {
-              this.clearEndTimer();
-              await this.onNaturalTrackEnd();
-              return;
+            if (progress > 0) {
+              if (remaining < 2500) {
+                this.nearEndSeen = true;
+                if (!this.endTimer) this.schedulePreciseEnd(remaining);
+              } else {
+                this.nearEndSeen = false;
+                this.clearEndTimer();
+              }
+
+              if (
+                this.confirmedPlaying &&
+                !state.is_playing &&
+                remaining < 2000
+              ) {
+                this.clearEndTimer();
+                await this.onNaturalTrackEnd();
+                return;
+              }
             }
           }
 
@@ -899,6 +1105,11 @@ export class QueueController {
     this.nearEndSeen = false;
     this.fading = false;
     this.holdSilent = false;
+    this.playIssuedAt = 0;
+    this.confirmedPlaying = false;
+    this.stuckRetryDone = false;
+    this.peakProgressMs = 0;
+    this.prematureEndSince = null;
   }
 
   private notify() {

@@ -67,13 +67,15 @@ npm run start
 | Route | Purpose |
 |-------|---------|
 | `/` | Landing + Spotify login |
-| `/library` | Genre shelves, Spotify playlist import, search, local files |
-| `/tandas` | Create/edit tandas + genre-strict suggestions |
-| `/events` | Night queue, rule validation, auto-generate, save |
-| `/dj` | DJ console: device picker, play/pause/skip, queue |
+| `/library` | Genre shelves, collapsible import tools, search, local files |
+| `/tandas` | Create/edit tandas, genre filters, suggestions |
+| `/events` | Night queue with drag reorder, auto-cortinas, validation |
+| `/dj` | DJ console: now playing, seek, volume, skip song or tanda |
 | `/remote` | Phone remote for Connect control |
 
 ## Library
+
+Import tools sit behind **Show / Hide import tools** (preference remembered).
 
 ### Spotify
 
@@ -104,25 +106,43 @@ Optional tag for the orchestra/ensemble (Di Sarli, Pugliese, …). Used for tand
 
 ## Tandas & recommendations
 
-Create named tandas (typically 4 tango / 3 vals or milonga). After selecting seed tracks, **Suggest more [genre]** ranks unused library tracks by orchestra/artist affinity, then Spotify search with genre keywords. Suggestions never cross genres (vals → vals only, etc.).
+Create or edit named tandas (typically **4 tango** / **3 vals or milonga** — min/max enforced in the UI). Leave the name blank to get **Untitled tango 1**, **Untitled vals 2**, etc.
+
+- Filter the genre library while picking tracks
+- Filter saved tandas by genre (All / Tango / Vals / Milonga)
+- After selecting seed tracks, **Suggest more [genre]** ranks unused library tracks by orchestra/artist affinity, then Spotify search with genre keywords
+- Suggestions never cross genres (vals → vals only, etc.)
 
 ## Events & sequencing
 
 Night queues follow El Recodo–style rules (`src/lib/domain/sequencing.ts`):
 
+- Pattern is **tanda → cortina** (queue should start with a tanda; no cortina after cortina)
 - Every tanda should be followed by a cortina
 - Never two “fast” tandas (`vals` / `milonga`) back-to-back
 - Prefer ~2 tango tandas between each fast tanda
 
-You can validate, auto-generate from your tanda pool, save named events, and load them into the DJ view.
+Building a night:
 
-## Playback
+- **Auto-add cortina with tanda** (on by default; preference remembered) — picks an unused cortina when you add a tanda
+- Drag-and-drop reorder (or move up/down); tandas and cortinas already used in the event are marked
+- Validate, auto-generate from your tanda pool (avoids reusing cortinas), save named events, and load them into the DJ view
+
+## Playback / DJ console
 
 - **Primary:** Spotify Connect — open the Spotify app, pick the device, set quality to **Very High** / HiFi in Spotify settings
 - **Secondary:** Local HTML5 audio for imported files
 - Mixed queues are allowed; engines switch per track
 - If Connect fails, the controller tries a **same-genre local fallback** (title/artist match when possible)
-- Library/tandas/events stay in a **localStorage cache** if Supabase is unavailable
+- Library/tandas/events stay in a **localStorage cache** if Supabase is unavailable (warning in the header)
+
+DJ controls:
+
+- Now playing with album art, timeline, and **click-to-seek**
+- Volume slider
+- Skip **previous / next song** within a tanda, or skip to the previous / next **tanda or cortina**
+- **Cortina length** — cortinas cut after N seconds (default 45s) with a fade over the last ~6s
+- **Silence between songs** — gap between tracks inside a tanda; cortina → next tanda fades with no gap
 
 ## Spotify scopes
 

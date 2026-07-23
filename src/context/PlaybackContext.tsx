@@ -163,16 +163,28 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     await controllerRef.current?.play();
   }, [getValidToken]);
 
+  const togglePlayPause = useCallback(async () => {
+    try {
+      await controllerRef.current?.togglePlayPause();
+    } catch {
+      /* QueueController surfaces errors via onError / status */
+    }
+  }, []);
+
   const pause = useCallback(async () => {
-    await controllerRef.current?.pause();
+    try {
+      await controllerRef.current?.pause();
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const resume = useCallback(async () => {
-    await controllerRef.current?.resume();
-  }, []);
-
-  const togglePlayPause = useCallback(async () => {
-    await controllerRef.current?.togglePlayPause();
+    try {
+      await controllerRef.current?.resume();
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const skipTrack = useCallback(async () => {

@@ -64,30 +64,38 @@ export async function playUris(
   }
 }
 
+/** Returns false when Spotify rejects (e.g. Restriction violated) instead of throwing. */
 export async function pausePlayback(
   accessToken: string,
   deviceId?: string | null
-): Promise<void> {
+): Promise<boolean> {
   const url = deviceId
     ? `${SPOTIFY_API_BASE}/me/player/pause?device_id=${encodeURIComponent(deviceId)}`
     : `${SPOTIFY_API_BASE}/me/player/pause`;
   const res = await fetchWithAuth(url, accessToken, { method: "PUT" });
-  if (!res.ok && res.status !== 204) {
-    throw new Error(await parseError(res));
+  if (res.ok || res.status === 204) return true;
+  const msg = await parseError(res);
+  if (/restriction violated|no active device|not paused/i.test(msg)) {
+    return false;
   }
+  throw new Error(msg);
 }
 
+/** Returns false when Spotify rejects instead of throwing. */
 export async function resumePlayback(
   accessToken: string,
   deviceId?: string | null
-): Promise<void> {
+): Promise<boolean> {
   const url = deviceId
     ? `${SPOTIFY_API_BASE}/me/player/play?device_id=${encodeURIComponent(deviceId)}`
     : `${SPOTIFY_API_BASE}/me/player/play`;
   const res = await fetchWithAuth(url, accessToken, { method: "PUT" });
-  if (!res.ok && res.status !== 204) {
-    throw new Error(await parseError(res));
+  if (res.ok || res.status === 204) return true;
+  const msg = await parseError(res);
+  if (/restriction violated|no active device/i.test(msg)) {
+    return false;
   }
+  throw new Error(msg);
 }
 
 export async function skipToNext(
