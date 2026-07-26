@@ -2,7 +2,10 @@
 
 Desktop-first Next.js app for organizing **tango / vals / milonga / cortina** libraries into tandas and milonga night queues. Playback uses **Spotify Connect** (the Spotify desktop/mobile app) or local audio files. Library, tandas, and events sync through **Supabase**, with an offline localStorage cache as backup.
 
-Repo: [github.com/S0ul3r/TangoDJ](https://github.com/S0ul3r/TangoDJ)
+Repo: [github.com/S0ul3r/TangoDJ](https://github.com/S0ul3r/TangoDJ)  
+Live: [tango-dj.vercel.app](https://tango-dj.vercel.app/library)
+
+![TangoDJ library — genre shelves, Spotify/local import tools, and track metadata](docs/library-screenshot.png)
 
 ## Stack
 
