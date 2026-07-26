@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { generatePKCE, getLoginUrl } from "@/lib/auth";
 import { useSpotify } from "@/context/SpotifyContext";
-import { getSpotifyRedirectUri } from "@/lib/spotifyRedirect";
+import {
+  getSpotifyRedirectUri,
+  redirectLocalhostToLoopbackIfNeeded,
+} from "@/lib/spotifyRedirect";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,6 +24,8 @@ export default function LoginPage() {
       return;
     }
     if (configError) return;
+    // Spotify allowlists 127.0.0.1 — stay on that origin for PKCE + redirect_uri.
+    if (redirectLocalhostToLoopbackIfNeeded()) return;
     // Prevent React Strict Mode from generating two different PKCE verifiers
     if (startedRef.current) return;
     startedRef.current = true;

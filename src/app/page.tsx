@@ -2,14 +2,17 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import { SupportButton } from "@/components/SupportButton";
 import { useSpotify } from "@/context/SpotifyContext";
 import { DASHBOARD_LINK } from "@/lib/constants";
+import { redirectLocalhostToLoopbackIfNeeded } from "@/lib/spotifyRedirect";
 
 export default function HomePage() {
   const router = useRouter();
   const { isAuthenticated } = useSpotify();
 
   useEffect(() => {
+    if (redirectLocalhostToLoopbackIfNeeded()) return;
     if (isAuthenticated) router.replace("/library");
   }, [isAuthenticated, router]);
 
@@ -36,7 +39,7 @@ export default function HomePage() {
           night through Spotify Connect — with local files as a quiet safety net.
         </p>
         <div
-          className="flex flex-wrap gap-3 animate-fade-up"
+          className="flex flex-wrap items-center gap-3 animate-fade-up"
           style={{ animationDelay: "180ms" }}
         >
           <a
@@ -53,6 +56,7 @@ export default function HomePage() {
           >
             Spotify Developer Dashboard
           </a>
+          <SupportButton variant="inline" />
         </div>
       </div>
     </div>

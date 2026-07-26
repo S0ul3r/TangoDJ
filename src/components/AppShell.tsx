@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
+import { SupportButton } from "@/components/SupportButton";
 import { useSpotify } from "@/context/SpotifyContext";
 import { useLibrary } from "@/context/LibraryContext";
 
@@ -113,6 +114,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 Offline
               </span>
             )}
+            <SupportButton variant="header" className="ml-1" />
             <button
               type="button"
               onClick={() => {

@@ -1,10 +1,16 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { exchangeCodeForToken } from "@/lib/auth";
 import { useSpotify } from "@/context/SpotifyContext";
-import { getSpotifyRedirectUri } from "@/lib/spotifyRedirect";
+import {
+  getSpotifyRedirectUri,
+  redirectLocalhostToLoopbackIfNeeded,
+} from "@/lib/spotifyRedirect";
+
+/** Survives React Strict Mode remounts so the auth code is exchanged once. */
+let exchangeInFlightForCode: string | null = null;
 
 function CallbackContent() {
   const router = useRouter();
@@ -12,10 +18,8 @@ function CallbackContent() {
   const { setTokens } = useSpotify();
   const [error, setError] = useState<string | null>(null);
 
-  const exchanged = useRef(false);
-
   useEffect(() => {
-    if (exchanged.current) return;
+    if (redirectLocalhostToLoopbackIfNeeded()) return;
 
     const code = searchParams.get("code");
     const codeVerifier = sessionStorage.getItem("spotify_code_verifier");
@@ -27,6 +31,8 @@ function CallbackContent() {
       queueMicrotask(() => setError(msg));
       return;
     }
+
+    if (exchangeInFlightForCode === code) return;
 
     const clientId = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
 
@@ -43,7 +49,7 @@ function CallbackContent() {
       return;
     }
 
-    exchanged.current = true;
+    exchangeInFlightForCode = code;
     exchangeCodeForToken(code, redirectUri, codeVerifier, clientId)
       .then((data) => {
         sessionStorage.removeItem("spotify_code_verifier");
@@ -51,7 +57,7 @@ function CallbackContent() {
         router.replace("/library");
       })
       .catch((err) => {
-        exchanged.current = false;
+        exchangeInFlightForCode = null;
         setError(err.message || "Failed to complete login.");
       });
   }, [searchParams, setTokens, router]);
