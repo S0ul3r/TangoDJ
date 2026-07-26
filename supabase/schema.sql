@@ -50,6 +50,7 @@ create table if not exists events (
   id uuid primary key,
   spotify_user_id text not null references profiles (spotify_user_id) on delete cascade,
   name text not null,
+  share_token text unique,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -58,9 +59,11 @@ create table if not exists event_items (
   id uuid primary key,
   event_id uuid not null references events (id) on delete cascade,
   position int not null,
-  item_type text not null check (item_type in ('tanda', 'cortina')),
+  item_type text not null check (item_type in ('tanda', 'cortina', 'marker')),
   tanda_id uuid references tandas (id) on delete set null,
   track_id uuid references tracks (id) on delete set null,
+  marker_kind text,
+  label text,
   unique (event_id, position)
 );
 

@@ -18,12 +18,12 @@ const NAV = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { isAuthenticated, logout } = useSpotify();
+  const { isAuthenticated, authReady, logout } = useSpotify();
   const { syncError, loading, cacheSavedAt } = useLibrary();
 
   useEffect(() => {
-    if (!isAuthenticated) router.replace("/");
-  }, [isAuthenticated, router]);
+    if (authReady && !isAuthenticated) router.replace("/");
+  }, [authReady, isAuthenticated, router]);
 
   useEffect(() => {
     if (loading) {
@@ -36,10 +36,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [loading, syncError]);
 
-  if (!isAuthenticated) {
+  if (!authReady || !isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center text-muted">
-        Redirecting…
+        {authReady ? "Redirecting…" : "Loading…"}
       </div>
     );
   }
@@ -65,7 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="site-bg" aria-hidden />
       <div className="site-bg-veil" aria-hidden />
 
-      <header className="sticky top-0 z-40 shrink-0 border-b border-border/70 bg-background/75 backdrop-blur-xl">
+      <header className="sticky top-0 z-40 shrink-0 border-b border-border/70 bg-background/75 backdrop-blur-xl print:hidden">
         <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-4 py-3 xl:px-6">
           <Link href="/library" className="group flex items-center gap-2.5">
             <img

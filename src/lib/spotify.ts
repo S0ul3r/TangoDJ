@@ -166,7 +166,11 @@ function asSearchTrack(raw: unknown): SpotifySearchTrack | null {
 
   const albumObj =
     t.album && typeof t.album === "object"
-      ? (t.album as { name?: string; images?: { url: string }[] })
+      ? (t.album as {
+          name?: string;
+          images?: { url: string }[];
+          release_date?: string;
+        })
       : null;
 
   return {
@@ -177,6 +181,7 @@ function asSearchTrack(raw: unknown): SpotifySearchTrack | null {
     album: {
       name: albumObj?.name ?? "",
       images: Array.isArray(albumObj?.images) ? albumObj!.images : [],
+      release_date: albumObj?.release_date ?? null,
     },
     duration_ms: typeof t.duration_ms === "number" ? t.duration_ms : 0,
   };

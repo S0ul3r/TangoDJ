@@ -1,10 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
+import { EventQueueList } from "@/components/events/EventQueueList";
+import { QueueValidationBanner } from "@/components/events/QueueValidationBanner";
 import { useLibrary } from "@/context/LibraryContext";
 import { usePlayback } from "@/context/PlaybackContext";
+import { buildSetlistLines, labelForQueueItem } from "@/lib/domain/eventLabels";
 import {
   autoGenerateNight,
   pickUnusedCortina,
@@ -13,16 +16,26 @@ import {
 import type {
   EventQueueItem,
   MilongaEvent,
+  SectionMarkerKind,
   TandaGenre,
 } from "@/types/domain";
+import { SECTION_MARKER_LABELS } from "@/types/domain";
 
 const AUTO_CORTINA_KEY = "tangodj.autoAddCortina";
+const HISTORY_LIMIT = 40;
 
 function readAutoCortina(): boolean {
   if (typeof window === "undefined") return true;
   const raw = localStorage.getItem(AUTO_CORTINA_KEY);
   if (raw === null) return true;
   return raw === "1";
+}
+
+function lastNonMarker(queue: EventQueueItem[]): EventQueueItem | undefined {
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].type !== "marker") return queue[i];
+  }
+  return undefined;
 }
 
 export default function EventsPage() {
@@ -32,13 +45,16 @@ export default function EventsPage() {
   const { loadEventQueue } = usePlayback();
 
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [shareToken, setShareToken] = useState<string | null>(null);
   const [name, setName] = useState("Tonight");
   const [items, setItems] = useState<EventQueueItem[]>([]);
+  const [history, setHistory] = useState<EventQueueItem[][]>([]);
   const [maxTandas, setMaxTandas] = useState(12);
   const [autoAddCortina, setAutoAddCortina] = useState(readAutoCortina);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const printRef = useRef<HTMLDivElement>(null);
 
   const tracksById = useMemo(
     () => new Map(tracks.map((t) => [t.id, t])),
@@ -77,6 +93,25 @@ export default function EventsPage() {
     window.setTimeout(() => setNotice(null), 3500);
   };
 
+  const commitItems = useCallback(
+    (updater: (prev: EventQueueItem[]) => EventQueueItem[]) => {
+      setItems((prev) => {
+        setHistory((h) => [...h.slice(-(HISTORY_LIMIT - 1)), prev]);
+        return updater(prev);
+      });
+    },
+    []
+  );
+
+  const undo = () => {
+    setHistory((h) => {
+      if (h.length === 0) return h;
+      const prev = h[h.length - 1];
+      setItems(prev);
+      return h.slice(0, -1);
+    });
+  };
+
   const setAutoCortina = (on: boolean) => {
     setAutoAddCortina(on);
     localStorage.setItem(AUTO_CORTINA_KEY, on ? "1" : "0");
@@ -84,14 +119,17 @@ export default function EventsPage() {
 
   const startNew = () => {
     setEditingId(null);
+    setShareToken(null);
     setName("Tonight");
+    setHistory([]);
     setItems([]);
   };
 
   const loadSaved = (event: MilongaEvent) => {
     setEditingId(event.id);
+    setShareToken(event.shareToken ?? null);
     setName(event.name);
-    setItems(event.items.map((i) => ({ ...i })));
+    commitItems(() => event.items.map((i) => ({ ...i })));
   };
 
   const appendTrailingCortinaIfNeeded = (
@@ -99,7 +137,7 @@ export default function EventsPage() {
   ): EventQueueItem[] => {
     if (!autoAddCortina) return queue;
     const next = [...queue];
-    const last = next[next.length - 1];
+    const last = lastNonMarker(next);
     if (last?.type === "tanda") {
       const cortina = pickUnusedCortina(cortinas, next);
       if (cortina) {
@@ -114,7 +152,7 @@ export default function EventsPage() {
   };
 
   const addTanda = (tandaId: string) => {
-    setItems((prev) => {
+    commitItems((prev) => {
       const next = appendTrailingCortinaIfNeeded([...prev]);
       next.push({ id: crypto.randomUUID(), type: "tanda", tandaId });
       if (autoAddCortina) {
@@ -125,11 +163,9 @@ export default function EventsPage() {
             type: "cortina",
             trackId: cortina.id,
           });
-        } else if (cortinas.length > 0) {
+        } else if (cortinas.length === 0) {
           queueMicrotask(() =>
-            showNotice(
-              "Tanda added, but no unused cortina left to auto-attach."
-            )
+            showNotice("Tanda added — add cortinas in Library to auto-attach.")
           );
         }
       }
@@ -138,35 +174,41 @@ export default function EventsPage() {
   };
 
   const addCortina = (trackId: string) => {
-    const last = items[items.length - 1];
+    const last = lastNonMarker(items);
     if (last?.type === "cortina") {
       showNotice(
         "Cannot add cortina: the queue already ends with a cortina. Add a tanda first (pattern is tanda → cortina)."
       );
       return;
     }
-    if (items.length === 0) {
+    if (!last) {
       showNotice("Cannot add cortina: the queue should start with a tanda.");
       return;
     }
-    if (items.some((i) => i.type === "cortina" && i.trackId === trackId)) {
-      showNotice(
-        "Cannot add cortina: that song is already used in this event."
-      );
-      return;
-    }
-    setItems((prev) => [
+    commitItems((prev) => [
       ...prev,
       { id: crypto.randomUUID(), type: "cortina", trackId },
     ]);
   };
 
+  const addMarker = (kind: SectionMarkerKind) => {
+    commitItems((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        type: "marker",
+        markerKind: kind,
+        label: SECTION_MARKER_LABELS[kind],
+      },
+    ]);
+  };
+
   const removeAt = (index: number) => {
-    setItems((prev) => prev.filter((_, i) => i !== index));
+    commitItems((prev) => prev.filter((_, i) => i !== index));
   };
 
   const move = (index: number, dir: -1 | 1) => {
-    setItems((prev) => {
+    commitItems((prev) => {
       const next = [...prev];
       const j = index + dir;
       if (j < 0 || j >= next.length) return prev;
@@ -177,7 +219,7 @@ export default function EventsPage() {
 
   const reorder = (from: number, to: number) => {
     if (from === to || from < 0 || to < 0) return;
-    setItems((prev) => {
+    commitItems((prev) => {
       if (from >= prev.length) return prev;
       const next = [...prev];
       const [moved] = next.splice(from, 1);
@@ -189,7 +231,7 @@ export default function EventsPage() {
 
   const autoFill = () => {
     const generated = autoGenerateNight(tandas, cortinas, { maxTandas });
-    setItems(generated);
+    commitItems(() => generated);
   };
 
   const save = async () => {
@@ -201,11 +243,48 @@ export default function EventsPage() {
       id: editingId ?? crypto.randomUUID(),
       name: name.trim() || "Untitled milonga",
       items,
+      shareToken: shareToken ?? existing?.shareToken ?? null,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
-    await upsertEvent(event);
-    setEditingId(event.id);
+    const saved = await upsertEvent(event);
+    setEditingId(saved.id);
+    if (saved.shareToken) setShareToken(saved.shareToken);
+    showNotice("Event saved.");
+  };
+
+  const ensureShareAndCopy = async () => {
+    if (!editingId) {
+      showNotice("Save the event first to create a share link.");
+      return;
+    }
+    let token = shareToken;
+    if (!token) {
+      token = crypto.randomUUID().replace(/-/g, "").slice(0, 22);
+      const now = new Date().toISOString();
+      const existing = events.find((e) => e.id === editingId);
+      const saved = await upsertEvent({
+        id: editingId,
+        name: name.trim() || "Untitled milonga",
+        items,
+        shareToken: token,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      });
+      token = saved.shareToken ?? token;
+      setShareToken(token);
+    }
+    const url = `${window.location.origin}/share/${token}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showNotice("Share link copied.");
+    } catch {
+      showNotice(url);
+    }
+  };
+
+  const exportPdf = () => {
+    window.print();
   };
 
   const sendToDj = () => {
@@ -213,16 +292,13 @@ export default function EventsPage() {
     router.push("/dj");
   };
 
-  const labelFor = (item: EventQueueItem) => {
-    if (item.type === "tanda") {
-      const t = item.tandaId ? tandasById.get(item.tandaId) : null;
-      return t
-        ? `Tanda · ${t.name} (${t.genre})`
-        : "Tanda · missing";
-    }
-    const track = item.trackId ? tracksById.get(item.trackId) : null;
-    return track ? `Cortina · ${track.name}` : "Cortina · missing";
-  };
+  const labelFor = (item: EventQueueItem) =>
+    labelForQueueItem(item, tandasById, tracksById);
+
+  const setlistLines = useMemo(
+    () => buildSetlistLines(items, tandasById, tracksById),
+    [items, tandasById, tracksById]
+  );
 
   const tandasByGenre = (g: TandaGenre) =>
     tandas.filter((t) => t.genre === g);
@@ -254,22 +330,32 @@ export default function EventsPage() {
 
   return (
     <AppShell>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 print:hidden">
         {notice ? (
           <p className="text-sm text-warn">{notice}</p>
         ) : (
           <span />
         )}
-        <button
-          type="button"
-          onClick={startNew}
-          className="text-sm text-muted hover:text-foreground"
-        >
-          New event
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={undo}
+            disabled={history.length === 0}
+            className="text-sm text-muted hover:text-foreground disabled:opacity-40"
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={startNew}
+            className="text-sm text-muted hover:text-foreground"
+          >
+            New event
+          </button>
+        </div>
       </div>
 
-      <div className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr]">
+      <div className="grid gap-8 lg:grid-cols-[1.2fr_0.8fr] print:hidden">
         <section className="rounded border border-border bg-surface/50 p-4">
           <label className="mb-1 block text-xs text-muted">Event name</label>
           <input
@@ -307,108 +393,37 @@ export default function EventsPage() {
             </label>
           </div>
 
-          <ul className="mb-4 min-h-[200px]">
-            {items.length === 0 && (
-              <li className="text-sm text-muted">Queue is empty.</li>
-            )}
-            {items.map((item, index) => (
-              <li key={item.id} className="list-none">
-                <div
-                  className={`queue-drop-gap ${
-                    dropIndex === index && dragIndex !== null ? "is-active" : ""
-                  }`}
-                  onDragOver={onDragOverGap(index)}
-                  onDrop={onDropGap(index)}
-                />
-                <div
-                  draggable
-                  onDragStart={onDragStart(index)}
-                  onDragEnd={onDragEnd}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const mid = rect.top + rect.height / 2;
-                    setDropIndex(e.clientY < mid ? index : index + 1);
-                  }}
-                  className={`queue-row flex items-center gap-1 rounded bg-surface-2 px-3 py-1.5 text-sm ${
-                    dragIndex === index ? "is-dragging" : ""
-                  }`}
-                >
-                  <span
-                    className="mr-1 select-none text-muted"
-                    title="Drag to reorder"
-                    aria-hidden
-                  >
-                    ⋮⋮
-                  </span>
-                  <span className="w-6 text-xs text-muted">{index + 1}</span>
-                  <span
-                    className={`flex-1 truncate ${
-                      item.type === "cortina" ? "text-muted" : "font-medium"
-                    }`}
-                  >
-                    {labelFor(item)}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => move(index, -1)}
-                    className="flex h-7 w-7 items-center justify-center rounded text-base text-muted hover:bg-surface hover:text-foreground"
-                    aria-label="Move up"
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => move(index, 1)}
-                    className="flex h-7 w-7 items-center justify-center rounded text-base text-muted hover:bg-surface hover:text-foreground"
-                    aria-label="Move down"
-                  >
-                    ↓
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => removeAt(index)}
-                    className="flex h-7 w-7 items-center justify-center rounded text-lg text-bad hover:bg-surface"
-                    aria-label="Remove"
-                  >
-                    ×
-                  </button>
-                </div>
-              </li>
+          <div className="mb-3 flex flex-wrap gap-2">
+            <span className="self-center text-xs text-muted">Sections:</span>
+            {(
+              ["first_half", "snack", "second_half"] as SectionMarkerKind[]
+            ).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => addMarker(kind)}
+                className="rounded border border-dashed border-border px-2 py-1 text-xs text-muted hover:border-accent hover:text-accent"
+              >
+                + {SECTION_MARKER_LABELS[kind]}
+              </button>
             ))}
-            {items.length > 0 && (
-              <div
-                className={`queue-drop-gap ${
-                  dropIndex === items.length && dragIndex !== null
-                    ? "is-active"
-                    : ""
-                }`}
-                onDragOver={onDragOverGap(items.length)}
-                onDrop={onDropGap(items.length)}
-              />
-            )}
-          </ul>
-
-          <div
-            className={`mb-4 rounded border px-3 py-2 text-sm ${
-              validation.ok
-                ? "border-good/40 bg-good/10 text-good"
-                : "border-bad/40 bg-bad/10 text-bad"
-            }`}
-          >
-            {validation.ok
-              ? validation.issues.length
-                ? `OK with notes: ${validation.issues[0].message}`
-                : "Queue looks good."
-              : validation.issues[0]?.message ?? "Invalid queue"}
-            {validation.issues.length > 1 && (
-              <ul className="mt-1 list-disc pl-4 text-xs opacity-90">
-                {validation.issues.slice(1, 4).map((issue, i) => (
-                  <li key={`${issue.code}-${i}`}>{issue.message}</li>
-                ))}
-              </ul>
-            )}
           </div>
+
+          <EventQueueList
+            items={items}
+            labelFor={labelFor}
+            dragIndex={dragIndex}
+            dropIndex={dropIndex}
+            onDragStart={onDragStart}
+            onDragOverGap={onDragOverGap}
+            onDropGap={onDropGap}
+            onDragEnd={onDragEnd}
+            onSetDropIndex={setDropIndex}
+            onMove={move}
+            onRemove={removeAt}
+          />
+
+          <QueueValidationBanner validation={validation} />
 
           <div className="flex flex-wrap gap-2">
             <button
@@ -425,6 +440,21 @@ export default function EventsPage() {
               className="rounded border border-border px-4 py-2 text-sm hover:border-accent hover:text-accent disabled:opacity-40"
             >
               Load in DJ view
+            </button>
+            <button
+              type="button"
+              onClick={exportPdf}
+              disabled={items.length === 0}
+              className="rounded border border-border px-4 py-2 text-sm hover:border-accent hover:text-accent disabled:opacity-40"
+            >
+              Print / PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => void ensureShareAndCopy()}
+              className="rounded border border-border px-4 py-2 text-sm hover:border-accent hover:text-accent"
+            >
+              Copy share link
             </button>
           </div>
         </section>
@@ -477,6 +507,9 @@ export default function EventsPage() {
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">
               Add cortina
             </h2>
+            <p className="mb-2 text-[11px] text-muted">
+              Auto-add rotates unused cortinas first, then least-used.
+            </p>
             <ul className="max-h-40 space-y-1 overflow-y-auto">
               {cortinas.map((c) => {
                 const used = usedCortinaIds.has(c.id);
@@ -485,8 +518,7 @@ export default function EventsPage() {
                     <button
                       type="button"
                       onClick={() => addCortina(c.id)}
-                      disabled={used}
-                      className="flex w-full items-center gap-2 rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex w-full items-center gap-2 rounded bg-surface px-2 py-1.5 text-left text-sm hover:bg-surface-2"
                     >
                       <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-accent-soft text-xs font-semibold text-accent">
                         +
@@ -494,7 +526,7 @@ export default function EventsPage() {
                       <span className="min-w-0 flex-1 truncate">{c.name}</span>
                       {used && (
                         <span className="shrink-0 text-[10px] text-muted">
-                          used
+                          in event
                         </span>
                       )}
                     </button>
@@ -544,6 +576,36 @@ export default function EventsPage() {
             </ul>
           </div>
         </aside>
+      </div>
+
+      {/* Printable setlist — visible only when printing */}
+      <div
+        ref={printRef}
+        className="hidden print:block print:bg-white print:p-8 print:text-black"
+      >
+        <h1 className="mb-1 text-2xl font-semibold">{name || "Milonga"}</h1>
+        <p className="mb-6 text-sm opacity-70">
+          Setlist · {setlistLines.filter((l) => l.kind === "tanda").length}{" "}
+          tandas
+        </p>
+        <ul className="space-y-1 text-sm leading-relaxed">
+          {setlistLines.map((line, i) => (
+            <li
+              key={`${line.kind}-${i}`}
+              className={
+                line.kind === "marker"
+                  ? "mt-4 border-t border-black/20 pt-3 text-xs font-semibold uppercase tracking-wide"
+                  : line.kind === "tanda"
+                    ? "mt-2 font-semibold"
+                    : line.kind === "cortina"
+                      ? "italic opacity-70"
+                      : ""
+              }
+            >
+              {line.text}
+            </li>
+          ))}
+        </ul>
       </div>
     </AppShell>
   );

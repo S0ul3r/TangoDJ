@@ -1,14 +1,9 @@
 "use client";
 
 import { usePlayback } from "@/context/PlaybackContext";
-import { useEffect } from "react";
 
 export function DevicePicker({ compact = false }: { compact?: boolean }) {
   const { devices, deviceId, setDeviceId, refreshDevices } = usePlayback();
-
-  useEffect(() => {
-    void refreshDevices();
-  }, [refreshDevices]);
 
   return (
     <div className={compact ? "flex flex-col gap-1" : "flex flex-col gap-2"}>

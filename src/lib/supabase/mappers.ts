@@ -71,6 +71,7 @@ export function mapEvent(
     id: String(row.id),
     name: String(row.name),
     items,
+    shareToken: (row.share_token as string | null) ?? null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -82,5 +83,7 @@ export function mapEventItem(row: Record<string, unknown>): EventQueueItem {
     type: row.item_type as EventQueueItem["type"],
     tandaId: (row.tanda_id as string | null) ?? null,
     trackId: (row.track_id as string | null) ?? null,
+    markerKind: (row.marker_kind as EventQueueItem["markerKind"]) ?? null,
+    label: (row.label as string | null) ?? null,
   };
 }

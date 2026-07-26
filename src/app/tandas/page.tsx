@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
+import { TandaTrackPicker } from "@/components/tandas/TandaTrackPicker";
 import { useLibrary } from "@/context/LibraryContext";
 import { useSpotify } from "@/context/SpotifyContext";
 import {
@@ -327,47 +328,14 @@ export default function TandasPage() {
               </div>
             )}
 
-            <div>
-              <input
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder={`Filter ${GENRE_LABELS[genre]} library…`}
-                className="mb-2 w-full rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-              />
-              <ul className="space-y-1">
-                {pool.map((t: Track) => {
-                  const on = selected.includes(t.id);
-                  return (
-                    <li key={t.id}>
-                      <button
-                        type="button"
-                        onClick={() => toggleTrack(t.id)}
-                        className={`flex w-full items-start gap-2 rounded-xl px-2 py-1.5 text-left text-sm ${
-                          on
-                            ? "bg-accent-soft text-accent"
-                            : "hover:bg-surface-2"
-                        }`}
-                      >
-                        <span className="mt-0.5 text-xs">{on ? "✓" : "+"}</span>
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium">
-                            {t.name}
-                          </span>
-                          <span className="block truncate text-xs text-muted">
-                            {t.orchestra || t.artists || t.source}
-                          </span>
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-                {pool.length === 0 && (
-                  <li className="text-sm text-muted">
-                    No tracks in this genre yet — import a playlist in Library.
-                  </li>
-                )}
-              </ul>
-            </div>
+            <TandaTrackPicker
+              tracks={pool}
+              selectedIds={selected}
+              filter={filter}
+              onFilterChange={setFilter}
+              onToggle={toggleTrack}
+              genreLabel={GENRE_LABELS[genre]}
+            />
           </div>
 
           {/* Sticky actions — always visible at bottom of panel */}

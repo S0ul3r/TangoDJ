@@ -4,6 +4,38 @@
 
 import type { Genre, SpotifySearchTrack, Track } from "@/types/domain";
 
+/** Parse Spotify album.release_date (YYYY or YYYY-MM-DD) into a year. */
+export function yearFromReleaseDate(
+  releaseDate: string | null | undefined
+): number | null {
+  if (!releaseDate) return null;
+  const m = releaseDate.trim().match(/^(\d{4})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  if (!Number.isFinite(y) || y < 1800 || y > 2100) return null;
+  return y;
+}
+
+/**
+ * Soft orchestra guess for tango metadata: prefer names that look like
+ * ensembles; otherwise use the primary artist (editable in Library).
+ */
+export function guessOrchestraFromArtists(
+  artists: { name: string }[] | string
+): string | null {
+  const names = Array.isArray(artists)
+    ? artists.map((a) => a.name.trim()).filter(Boolean)
+    : artists
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+  if (names.length === 0) return null;
+  const ensemble = names.find((n) =>
+    /orquesta|orchestra|sexteto|cuarteto|ensemble|tipica|típica/i.test(n)
+  );
+  return ensemble ?? names[0] ?? null;
+}
+
 export function createSpotifyTrack(
   item: Pick<
     SpotifySearchTrack,
@@ -18,8 +50,8 @@ export function createSpotifyTrack(
     genre,
     name: item.name,
     artists: item.artists.map((a) => a.name).join(", "),
-    orchestra: null,
-    year: null,
+    orchestra: guessOrchestraFromArtists(item.artists),
+    year: yearFromReleaseDate(item.album?.release_date),
     singer: null,
     durationMs: item.duration_ms,
     spotifyUri: item.uri,

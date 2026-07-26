@@ -251,3 +251,24 @@ h3 {
   opacity: 0.45;
   transform: scale(0.98);
 }
+
+@media print {
+  .site-bg,
+  .site-bg-veil,
+  nav,
+  header,
+  aside,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  .print\:block {
+    display: block !important;
+  }
+}
+

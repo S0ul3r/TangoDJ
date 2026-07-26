@@ -12,13 +12,14 @@ import {
 
 export default function LoginPage() {
   const router = useRouter();
-  const { isAuthenticated } = useSpotify();
+  const { isAuthenticated, authReady } = useSpotify();
   const clientId = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
   const configError = !clientId ? "missing_credentials" : null;
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
   useEffect(() => {
+    if (!authReady) return;
     if (isAuthenticated) {
       router.replace("/library");
       return;
@@ -48,7 +49,7 @@ export default function LoginPage() {
     };
 
     void initLogin();
-  }, [isAuthenticated, router, configError, clientId]);
+  }, [authReady, isAuthenticated, router, configError, clientId]);
 
   if (configError === "missing_credentials") {
     return (

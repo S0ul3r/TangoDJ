@@ -3,7 +3,8 @@
 export type Genre = "tango" | "vals" | "milonga" | "cortina";
 export type TandaGenre = "tango" | "vals" | "milonga";
 export type TrackSource = "spotify" | "local";
-export type QueueItemType = "tanda" | "cortina";
+export type QueueItemType = "tanda" | "cortina" | "marker";
+export type SectionMarkerKind = "first_half" | "snack" | "second_half" | "custom";
 
 export interface Track {
   id: string;
@@ -42,12 +43,18 @@ export interface EventQueueItem {
   tandaId?: string | null;
   /** When type=cortina — track id from cortina genre */
   trackId?: string | null;
+  /** When type=marker */
+  markerKind?: SectionMarkerKind | null;
+  /** Display label for markers (especially custom) */
+  label?: string | null;
 }
 
 export interface MilongaEvent {
   id: string;
   name: string;
   items: EventQueueItem[];
+  /** Opaque token for public read-only share URL */
+  shareToken?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -78,7 +85,11 @@ export interface SpotifySearchTrack {
   uri: string;
   name: string;
   artists: { name: string }[];
-  album: { name: string; images: { url: string }[] };
+  album: {
+    name: string;
+    images: { url: string }[];
+    release_date?: string | null;
+  };
   duration_ms: number;
 }
 
@@ -95,4 +106,11 @@ export const GENRE_LABELS: Record<Genre, string> = {
   vals: "Vals",
   milonga: "Milonga",
   cortina: "Cortina",
+};
+
+export const SECTION_MARKER_LABELS: Record<SectionMarkerKind, string> = {
+  first_half: "1st half",
+  snack: "Snack / break",
+  second_half: "2nd half",
+  custom: "Section",
 };

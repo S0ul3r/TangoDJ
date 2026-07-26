@@ -1,5 +1,5 @@
 /**
- * HTML5 Audio wrapper for local MP3 playback
+ * HTML5 Audio wrapper for local MP3 playback, with optional warm/preload.
  */
 
 type EndedHandler = () => void;
@@ -12,6 +12,11 @@ export class LocalAudioPlayer {
   private onError: ErrorHandler | null = null;
   private volume = 1;
 
+  /** Paused element kept ready for the next local track. */
+  private warmAudio: HTMLAudioElement | null = null;
+  private warmUrl: string | null = null;
+  private warmKey: string | null = null;
+
   setEndedHandler(handler: EndedHandler | null) {
     this.onEnded = handler;
   }
@@ -20,7 +25,60 @@ export class LocalAudioPlayer {
     this.onError = handler;
   }
 
-  async playFile(file: File | Blob): Promise<void> {
+  /** Resolve a File/Blob into a paused, buffering Audio element. */
+  async warmFile(key: string, file: File | Blob): Promise<void> {
+    if (!key || this.warmKey === key) return;
+    this.clearWarm();
+    const audio = new Audio();
+    const url = URL.createObjectURL(file);
+    this.warmAudio = audio;
+    this.warmUrl = url;
+    this.warmKey = key;
+    audio.preload = "auto";
+    audio.src = url;
+    audio.volume = 0;
+    try {
+      audio.load();
+    } catch {
+      this.clearWarm();
+    }
+  }
+
+  clearWarm(): void {
+    if (this.warmAudio) {
+      this.warmAudio.pause();
+      this.warmAudio.removeAttribute("src");
+      this.warmAudio.load();
+      this.warmAudio = null;
+    }
+    if (this.warmUrl) {
+      URL.revokeObjectURL(this.warmUrl);
+      this.warmUrl = null;
+    }
+    this.warmKey = null;
+  }
+
+  async playFile(file: File | Blob, warmKey?: string | null): Promise<void> {
+    // Promote preloaded element when keys match
+    if (warmKey && this.warmKey === warmKey && this.warmAudio && this.warmUrl) {
+      this.stopActiveOnly();
+      this.audio = this.warmAudio;
+      this.objectUrl = this.warmUrl;
+      this.warmAudio = null;
+      this.warmUrl = null;
+      this.warmKey = null;
+      this.audio.volume = this.volume;
+      this.audio.onended = () => this.onEnded?.();
+      this.audio.onerror = () => this.onError?.("Failed to play local audio file.");
+      try {
+        this.audio.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+      await this.audio.play();
+      return;
+    }
+
     this.stop();
     const audio = new Audio();
     this.audio = audio;
@@ -50,9 +108,11 @@ export class LocalAudioPlayer {
     if (this.audio) this.audio.volume = this.volume;
   }
 
-  stop(): void {
+  private stopActiveOnly(): void {
     if (this.audio) {
       this.audio.pause();
+      this.audio.onended = null;
+      this.audio.onerror = null;
       this.audio.removeAttribute("src");
       this.audio.load();
       this.audio = null;
@@ -61,6 +121,11 @@ export class LocalAudioPlayer {
       URL.revokeObjectURL(this.objectUrl);
       this.objectUrl = null;
     }
+  }
+
+  stop(): void {
+    this.stopActiveOnly();
+    this.clearWarm();
   }
 
   get currentTime(): number {

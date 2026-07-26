@@ -2,7 +2,6 @@
 
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { exchangeCodeForToken } from "@/lib/auth";
 import { useSpotify } from "@/context/SpotifyContext";
 import {
   getSpotifyRedirectUri,
@@ -34,13 +33,6 @@ function CallbackContent() {
 
     if (exchangeInFlightForCode === code) return;
 
-    const clientId = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
-
-    if (!clientId) {
-      queueMicrotask(() => setError("Server configuration error."));
-      return;
-    }
-
     let redirectUri: string;
     try {
       redirectUri = getSpotifyRedirectUri();
@@ -50,15 +42,28 @@ function CallbackContent() {
     }
 
     exchangeInFlightForCode = code;
-    exchangeCodeForToken(code, redirectUri, codeVerifier, clientId)
-      .then((data) => {
+    fetch("/api/auth/callback", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, codeVerifier, redirectUri }),
+    })
+      .then(async (res) => {
+        const data = (await res.json()) as {
+          access_token?: string;
+          expires_in?: number;
+          error?: string;
+        };
+        if (!res.ok || !data.access_token) {
+          throw new Error(data.error || "Failed to complete login.");
+        }
         sessionStorage.removeItem("spotify_code_verifier");
-        setTokens(data.access_token, data.refresh_token, data.expires_in);
+        setTokens(data.access_token, undefined, data.expires_in);
         router.replace("/library");
       })
       .catch((err) => {
         exchangeInFlightForCode = null;
-        setError(err.message || "Failed to complete login.");
+        setError(err instanceof Error ? err.message : "Failed to complete login.");
       });
   }, [searchParams, setTokens, router]);
 

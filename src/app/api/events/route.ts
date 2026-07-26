@@ -19,11 +19,16 @@ export async function POST(req: Request) {
     }
 
     const supabase = getServiceSupabase();
+    const shareToken =
+      event.shareToken?.trim() ||
+      crypto.randomUUID().replace(/-/g, "").slice(0, 22);
+
     const { error: eErr } = await supabase.from("events").upsert(
       {
         id: event.id,
         spotify_user_id: user.id,
         name: event.name,
+        share_token: shareToken,
         created_at: event.createdAt,
         updated_at: event.updatedAt,
       },
@@ -40,20 +45,25 @@ export async function POST(req: Request) {
         item_type: item.type,
         tanda_id: item.tandaId ?? null,
         track_id: item.trackId ?? null,
+        marker_kind: item.markerKind ?? null,
+        label: item.label ?? null,
       }));
       const { error: iErr } = await supabase.from("event_items").insert(rows);
       if (iErr) throw new Error(iErr.message);
     }
 
-    return NextResponse.json({ event: mapEvent(
-      {
-        id: event.id,
-        name: event.name,
-        created_at: event.createdAt,
-        updated_at: event.updatedAt,
-      },
-      event.items
-    ) });
+    return NextResponse.json({
+      event: mapEvent(
+        {
+          id: event.id,
+          name: event.name,
+          share_token: shareToken,
+          created_at: event.createdAt,
+          updated_at: event.updatedAt,
+        },
+        event.items
+      ),
+    });
   } catch (e) {
     if (e instanceof AuthError) {
       return NextResponse.json({ error: e.message }, { status: e.status });

@@ -9,12 +9,12 @@ import { redirectLocalhostToLoopbackIfNeeded } from "@/lib/spotifyRedirect";
 
 export default function HomePage() {
   const router = useRouter();
-  const { isAuthenticated } = useSpotify();
+  const { isAuthenticated, authReady } = useSpotify();
 
   useEffect(() => {
     if (redirectLocalhostToLoopbackIfNeeded()) return;
-    if (isAuthenticated) router.replace("/library");
-  }, [isAuthenticated, router]);
+    if (authReady && isAuthenticated) router.replace("/library");
+  }, [authReady, isAuthenticated, router]);
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden">

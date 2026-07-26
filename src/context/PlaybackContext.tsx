@@ -8,6 +8,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { useSpotify } from "@/context/SpotifyContext";
 import { useLibrary } from "@/context/LibraryContext";
@@ -22,6 +23,11 @@ import type { EventQueueItem, Track } from "@/types/domain";
 
 const CORTINA_STORAGE_KEY = "tangodj.cortinaSeconds";
 const GAP_STORAGE_KEY = "tangodj.gapSeconds";
+
+interface PlaybackProgress {
+  progressMs: number;
+  durationMs: number;
+}
 
 interface PlaybackContextType {
   devices: ReturnType<typeof useConnectDevices>["devices"];
@@ -49,6 +55,9 @@ interface PlaybackContextType {
   setGapSeconds: (seconds: number) => void;
   volumePercent: number;
   setVolumePercent: (percent: number) => Promise<void>;
+  /** Subscribe to progress-only updates (does not re-render usePlayback consumers). */
+  subscribeProgress: (listener: () => void) => () => void;
+  getProgressSnapshot: () => PlaybackProgress;
 }
 
 const PlaybackContext = createContext<PlaybackContextType | null>(null);
@@ -68,6 +77,8 @@ function readStoredGapSeconds(): number {
   if (!Number.isFinite(n)) return 2;
   return Math.min(10, Math.max(0, Math.round(n)));
 }
+
+const EMPTY_PROGRESS: PlaybackProgress = { progressMs: 0, durationMs: 0 };
 
 export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   const { getValidToken } = useSpotify();
@@ -91,30 +102,79 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   const [volumePercent, setVolumePercentState] = useState(100);
 
   const deviceIdRef = useRef<string | null>(null);
+  const getValidTokenRef = useRef(getValidToken);
+  const getLocalFileRef = useRef(getLocalFile);
   const controllerRef = useRef<QueueController | null>(null);
+  const progressListenersRef = useRef(new Set<() => void>());
+  const progressSnapshotRef = useRef<PlaybackProgress>(EMPTY_PROGRESS);
+
+  getValidTokenRef.current = getValidToken;
+  getLocalFileRef.current = getLocalFile;
 
   useEffect(() => {
     deviceIdRef.current = deviceId;
   }, [deviceId]);
 
+  const syncProgressSnapshot = useCallback(() => {
+    const next =
+      controllerRef.current?.getProgress() ?? EMPTY_PROGRESS;
+    const prev = progressSnapshotRef.current;
+    if (
+      prev.progressMs === next.progressMs &&
+      prev.durationMs === next.durationMs
+    ) {
+      return;
+    }
+    progressSnapshotRef.current = next;
+  }, []);
+
+  const emitProgress = useCallback(() => {
+    syncProgressSnapshot();
+    progressListenersRef.current.forEach((listener) => listener());
+  }, [syncProgressSnapshot]);
+
+  const syncStructuralState = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    setStatus(controller.getStatus());
+    setError(controller.getError());
+    setNowPlaying(controller.getNowPlaying());
+    setVolumePercentState(controller.getVolumePercent());
+    syncProgressSnapshot();
+  }, [syncProgressSnapshot]);
+
+  // Create the controller once — deps are read through stable refs.
   useEffect(() => {
     const controller = new QueueController({
-      getAccessToken: getValidToken,
+      getAccessToken: () => getValidTokenRef.current(),
       getDeviceId: () => deviceIdRef.current,
-      resolveLocalFile: (track: Track) => getLocalFile(track),
+      resolveLocalFile: (track: Track) => getLocalFileRef.current(track),
       onChange: () => {
-        setStatus(controller.getStatus());
-        setError(controller.getError());
-        setNowPlaying(controller.getNowPlaying());
-        setVolumePercentState(controller.getVolumePercent());
+        syncStructuralState();
+        emitProgress();
+      },
+      onProgress: () => {
+        emitProgress();
       },
       onError: (msg) => setError(msg),
     });
     controller.setCortinaSeconds(readStoredCortinaSeconds());
     controller.setGapSeconds(readStoredGapSeconds());
     controllerRef.current = controller;
-    return () => controller.destroy();
-  }, [getLocalFile, getValidToken]);
+    return () => {
+      controller.destroy();
+      controllerRef.current = null;
+    };
+  }, [emitProgress, syncStructuralState]);
+
+  const subscribeProgress = useCallback((listener: () => void) => {
+    progressListenersRef.current.add(listener);
+    return () => {
+      progressListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const getProgressSnapshot = useCallback(() => progressSnapshotRef.current, []);
 
   const setCortinaSeconds = useCallback((seconds: number) => {
     const clamped = Math.min(200, Math.max(10, Math.round(seconds)));
@@ -139,10 +199,10 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
     (items: EventQueueItem[]) => {
       setActiveQueue(items);
       controllerRef.current?.loadQueue(items, tandas, tracks);
-      setStatus(controllerRef.current?.getStatus() ?? "idle");
-      setNowPlaying(controllerRef.current?.getNowPlaying() ?? null);
+      syncStructuralState();
+      emitProgress();
     },
-    [tandas, tracks]
+    [tandas, tracks, syncStructuralState, emitProgress]
   );
 
   useEffect(() => {
@@ -151,7 +211,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
   }, [tracks, tandas]);
 
   const play = useCallback(async () => {
-    const token = await getValidToken();
+    const token = await getValidTokenRef.current();
     const id = deviceIdRef.current;
     if (token && id) {
       try {
@@ -161,7 +221,7 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       }
     }
     await controllerRef.current?.play();
-  }, [getValidToken]);
+  }, []);
 
   const togglePlayPause = useCallback(async () => {
     try {
@@ -240,6 +300,8 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       setGapSeconds,
       volumePercent,
       setVolumePercent,
+      subscribeProgress,
+      getProgressSnapshot,
     }),
     [
       devices,
@@ -267,6 +329,8 @@ export function PlaybackProvider({ children }: { children: React.ReactNode }) {
       setGapSeconds,
       volumePercent,
       setVolumePercent,
+      subscribeProgress,
+      getProgressSnapshot,
     ]
   );
 
@@ -279,4 +343,14 @@ export function usePlayback() {
   const ctx = useContext(PlaybackContext);
   if (!ctx) throw new Error("usePlayback must be used within PlaybackProvider");
   return ctx;
+}
+
+/** Progress-only subscription — isolates ~4Hz seek-bar updates from the rest of the tree. */
+export function usePlaybackProgress(): PlaybackProgress {
+  const { subscribeProgress, getProgressSnapshot } = usePlayback();
+  return useSyncExternalStore(
+    subscribeProgress,
+    getProgressSnapshot,
+    () => EMPTY_PROGRESS
+  );
 }

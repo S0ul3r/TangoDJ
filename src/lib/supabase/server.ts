@@ -3,6 +3,26 @@ import { getProfile, type SpotifyUser } from "@/lib/spotify";
 
 let cached: SupabaseClient | null = null;
 
+/** Cache Spotify /me lookups so every library write does not hit the API. */
+const PROFILE_TTL_MS = 10 * 60 * 1000;
+const profileByToken = new Map<
+  string,
+  { user: SpotifyUser; expiresAt: number }
+>();
+
+function pruneProfileCache() {
+  if (profileByToken.size < 40) return;
+  const now = Date.now();
+  for (const [token, entry] of profileByToken) {
+    if (entry.expiresAt <= now) profileByToken.delete(token);
+  }
+  // Hard cap — drop oldest entries if still large
+  if (profileByToken.size > 80) {
+    const keys = [...profileByToken.keys()].slice(0, profileByToken.size - 40);
+    for (const key of keys) profileByToken.delete(key);
+  }
+}
+
 export function getServiceSupabase(): SupabaseClient {
   if (cached) return cached;
   const url = process.env.SUPABASE_URL;
@@ -29,9 +49,22 @@ export async function requireSpotifyUser(req: Request): Promise<SpotifyUser> {
   if (!token) {
     throw new AuthError("Missing Spotify access token.", 401);
   }
+
+  const hit = profileByToken.get(token);
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.user;
+  }
+
   try {
-    return await getProfile(token);
+    const user = await getProfile(token);
+    profileByToken.set(token, {
+      user,
+      expiresAt: Date.now() + PROFILE_TTL_MS,
+    });
+    pruneProfileCache();
+    return user;
   } catch {
+    profileByToken.delete(token);
     throw new AuthError("Invalid or expired Spotify token.", 401);
   }
 }

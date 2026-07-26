@@ -42,7 +42,7 @@ interface LibraryContextType {
   deleteTracks: (ids: string[]) => Promise<void>;
   upsertTanda: (tanda: Tanda) => Promise<void>;
   deleteTanda: (id: string) => Promise<void>;
-  upsertEvent: (event: MilongaEvent) => Promise<void>;
+  upsertEvent: (event: MilongaEvent) => Promise<MilongaEvent>;
   deleteEvent: (id: string) => Promise<void>;
   linkLocalFolder: () => Promise<number>;
   importLocalFolderToGenre: (genre: Genre) => Promise<number>;
@@ -219,16 +219,24 @@ export function LibraryProvider({ children }: { children: React.ReactNode }) {
   );
 
   const upsertEvent = useCallback(
-    async (event: MilongaEvent) => {
+    async (event: MilongaEvent): Promise<MilongaEvent> => {
       const next = [...events.filter((e) => e.id !== event.id), event];
       persistLocal({ tracks, tandas, events: next });
       try {
-        await authFetch("/api/events", {
+        const data = await authFetch("/api/events", {
           method: "POST",
           body: JSON.stringify({ event }),
         });
+        const saved = (data?.event as MilongaEvent | undefined) ?? event;
+        persistLocal({
+          tracks,
+          tandas,
+          events: [...events.filter((e) => e.id !== saved.id), saved],
+        });
+        return saved;
       } catch (e) {
         setSyncError(e instanceof Error ? e.message : "Failed to sync event");
+        return event;
       }
     },
     [authFetch, events, persistLocal, tandas, tracks]

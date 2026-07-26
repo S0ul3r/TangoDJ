@@ -51,6 +51,7 @@ export function validateQueue(
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
+    if (item.type === "marker") continue;
     if (item.type === "tanda") {
       if (!item.tandaId || !tandasById.has(item.tandaId)) {
         issues.push({
@@ -59,7 +60,10 @@ export function validateQueue(
           itemIndex: i,
         });
       }
-      const next = items[i + 1];
+      // Next playable item should be a cortina (markers ignored)
+      let j = i + 1;
+      while (j < items.length && items[j]?.type === "marker") j += 1;
+      const next = items[j];
       if (!next || next.type !== "cortina") {
         issues.push({
           code: "tanda_needs_cortina",
@@ -84,7 +88,9 @@ export function validateQueue(
           });
         }
       }
-      const prev = items[i - 1];
+      let p = i - 1;
+      while (p >= 0 && items[p]?.type === "marker") p -= 1;
+      const prev = p >= 0 ? items[p] : undefined;
       if (prev?.type === "cortina") {
         issues.push({
           code: "cortina_after_cortina",
@@ -92,7 +98,15 @@ export function validateQueue(
           itemIndex: i,
         });
       }
-      if (i === 0) {
+      // First playable item should not be a cortina
+      let firstPlayable = 0;
+      while (
+        firstPlayable < items.length &&
+        items[firstPlayable]?.type === "marker"
+      ) {
+        firstPlayable += 1;
+      }
+      if (i === firstPlayable) {
         issues.push({
           code: "starts_with_cortina",
           message: "Queue should start with a tanda, not a cortina.",
@@ -257,19 +271,45 @@ export function autoGenerateNight(
   return items;
 }
 
-/** Pick a random cortina not already used in the event queue. */
+/** Pick a cortina with rotation: prefer unused, else least-used (allows reuse). */
 export function pickUnusedCortina(
   cortinaTracks: Track[],
   items: EventQueueItem[]
 ): Track | null {
-  const used = new Set(
-    items
-      .filter((i) => i.type === "cortina" && i.trackId)
-      .map((i) => i.trackId as string)
-  );
-  const unused = cortinaTracks.filter((c) => !used.has(c.id));
-  if (unused.length === 0) return null;
-  return unused[Math.floor(Math.random() * unused.length)];
+  if (cortinaTracks.length === 0) return null;
+
+  const usedIds = items
+    .filter((i) => i.type === "cortina" && i.trackId)
+    .map((i) => i.trackId as string);
+
+  const unused = cortinaTracks.filter((c) => !usedIds.includes(c.id));
+  if (unused.length > 0) {
+    // Deterministic rotation among unused so auto-add feels stable
+    return unused[usedIds.length % unused.length];
+  }
+
+  // All cortinas already used — rotate to the least-used (earliest first use)
+  const counts = new Map<string, number>();
+  for (const id of usedIds) {
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  let best: Track | null = null;
+  let bestCount = Number.POSITIVE_INFINITY;
+  let bestFirstIndex = Number.POSITIVE_INFINITY;
+  for (const c of cortinaTracks) {
+    const count = counts.get(c.id) ?? 0;
+    const first = usedIds.indexOf(c.id);
+    const firstIdx = first === -1 ? Number.POSITIVE_INFINITY : first;
+    if (
+      count < bestCount ||
+      (count === bestCount && firstIdx < bestFirstIndex)
+    ) {
+      best = c;
+      bestCount = count;
+      bestFirstIndex = firstIdx;
+    }
+  }
+  return best;
 }
 
 export function genreOfQueueItem(

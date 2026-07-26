@@ -8,117 +8,174 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { refreshAccessToken } from "@/lib/auth";
 
 interface SpotifyContextType {
   accessToken: string | null;
+  /** Always null — refresh lives in an httpOnly cookie. Kept for API compatibility. */
   refreshToken: string | null;
   setTokens: (access: string, refresh?: string, expiresIn?: number) => void;
   logout: () => void;
   isAuthenticated: boolean;
+  /** False until the initial cookie/localStorage session probe finishes. */
+  authReady: boolean;
   getValidToken: () => Promise<string | null>;
 }
 
 const SpotifyContext = createContext<SpotifyContextType | null>(null);
 
-const TOKEN_KEY = "spotify_access_token";
-const REFRESH_KEY = "spotify_refresh_token";
-const EXPIRES_KEY = "spotify_expires_at";
+/** Legacy localStorage keys — cleared after cookie migration. */
+const LEGACY_TOKEN_KEY = "spotify_access_token";
+const LEGACY_REFRESH_KEY = "spotify_refresh_token";
+const LEGACY_EXPIRES_KEY = "spotify_expires_at";
+
 const BUFFER_MS = 60 * 1000;
+
+function clearLegacyStorage() {
+  try {
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_REFRESH_KEY);
+    localStorage.removeItem(LEGACY_EXPIRES_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 export function SpotifyProvider({ children }: { children: React.ReactNode }) {
   const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [refreshToken, setRefreshToken] = useState<string | null>(null);
+  const [expiresAt, setExpiresAt] = useState<number>(0);
+  const [authReady, setAuthReady] = useState(false);
+  const accessRef = useRef<string | null>(null);
+  const expiresAtRef = useRef(0);
   const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
 
+  accessRef.current = accessToken;
+  expiresAtRef.current = expiresAt;
+
+  const applyAccess = useCallback((access: string, expiresIn: number) => {
+    setAccessToken(access);
+    setExpiresAt(Date.now() + expiresIn * 1000);
+  }, []);
+
   const setTokens = useCallback(
-    (access: string, refresh?: string, expiresIn?: number) => {
-      setAccessToken(access);
-      if (refresh) {
-        setRefreshToken(refresh);
-        localStorage.setItem(REFRESH_KEY, refresh);
-      }
-      localStorage.setItem(TOKEN_KEY, access);
-      if (expiresIn) {
-        localStorage.setItem(
-          EXPIRES_KEY,
-          String(Date.now() + expiresIn * 1000)
-        );
-      }
+    (access: string, _refresh?: string, expiresIn?: number) => {
+      applyAccess(access, expiresIn ?? 3600);
     },
-    []
+    [applyAccess]
   );
 
   const logout = useCallback(() => {
     setAccessToken(null);
-    setRefreshToken(null);
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(REFRESH_KEY);
-    localStorage.removeItem(EXPIRES_KEY);
+    setExpiresAt(0);
+    clearLegacyStorage();
+    void fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
   }, []);
+
+  const refreshFromServer = useCallback(async (): Promise<string | null> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+
+    refreshPromiseRef.current = (async () => {
+      try {
+        const res = await fetch("/api/auth/refresh", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+        if (!res.ok) {
+          setAccessToken(null);
+          setExpiresAt(0);
+          return null;
+        }
+        const data = (await res.json()) as {
+          access_token: string;
+          expires_in: number;
+        };
+        applyAccess(data.access_token, data.expires_in);
+        return data.access_token;
+      } catch {
+        setAccessToken(null);
+        setExpiresAt(0);
+        return null;
+      } finally {
+        refreshPromiseRef.current = null;
+      }
+    })();
+
+    return refreshPromiseRef.current;
+  }, [applyAccess]);
 
   const getValidToken = useCallback(async (): Promise<string | null> => {
-    const stored = localStorage.getItem(TOKEN_KEY);
-    const refresh = localStorage.getItem(REFRESH_KEY);
-    const expiresAt = localStorage.getItem(EXPIRES_KEY);
-
-    if (!stored) return null;
-
-    const expiresAtNum = expiresAt ? parseInt(expiresAt, 10) : 0;
-    const needsRefresh = Date.now() >= expiresAtNum - BUFFER_MS;
-
-    if (needsRefresh && refresh) {
-      if (refreshPromiseRef.current) return refreshPromiseRef.current;
-      const clientId = process.env.NEXT_PUBLIC_SPOTIFY_CLIENT_ID;
-      if (!clientId) return stored;
-
-      refreshPromiseRef.current = refreshAccessToken(refresh, clientId)
-        .then((data) => {
-          setTokens(
-            data.access_token,
-            data.refresh_token ?? refresh,
-            data.expires_in
-          );
-          refreshPromiseRef.current = null;
-          return data.access_token;
-        })
-        .catch(() => {
-          logout();
-          refreshPromiseRef.current = null;
-          return null;
-        });
-      return refreshPromiseRef.current;
-    }
-    return stored;
-  }, [setTokens, logout]);
+    const current = accessRef.current;
+    const exp = expiresAtRef.current;
+    if (current && Date.now() < exp - BUFFER_MS) return current;
+    return refreshFromServer();
+  }, [refreshFromServer]);
 
   useEffect(() => {
-    const stored = localStorage.getItem(TOKEN_KEY);
-    const refresh = localStorage.getItem(REFRESH_KEY);
-    const expiresAt = localStorage.getItem(EXPIRES_KEY);
-    if (stored) {
-      queueMicrotask(() => {
-        const expiresAtNum = expiresAt ? parseInt(expiresAt, 10) : 0;
-        const isExpired = expiresAtNum && Date.now() >= expiresAtNum && !refresh;
-        if (isExpired) {
-          setAccessToken(null);
-          localStorage.removeItem(TOKEN_KEY);
-        } else {
-          setAccessToken(stored);
-          if (refresh) setRefreshToken(refresh);
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/refresh", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            access_token: string;
+            expires_in: number;
+          };
+          if (!cancelled) {
+            applyAccess(data.access_token, data.expires_in);
+            clearLegacyStorage();
+          }
+          return;
         }
-      });
-    }
-  }, []);
+
+        let legacyRefresh: string | null = null;
+        try {
+          legacyRefresh = localStorage.getItem(LEGACY_REFRESH_KEY);
+        } catch {
+          legacyRefresh = null;
+        }
+
+        if (legacyRefresh) {
+          const adopt = await fetch("/api/auth/adopt", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: legacyRefresh }),
+          });
+          if (adopt.ok) {
+            const data = (await adopt.json()) as {
+              access_token: string;
+              expires_in: number;
+            };
+            if (!cancelled) {
+              applyAccess(data.access_token, data.expires_in);
+              clearLegacyStorage();
+            }
+            return;
+          }
+          clearLegacyStorage();
+        }
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyAccess]);
 
   return (
     <SpotifyContext.Provider
       value={{
         accessToken,
-        refreshToken,
+        refreshToken: null,
         setTokens,
         logout,
         isAuthenticated: !!accessToken,
+        authReady,
         getValidToken,
       }}
     >

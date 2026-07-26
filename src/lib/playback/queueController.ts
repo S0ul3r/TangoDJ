@@ -1,6 +1,8 @@
 /**
  * Unified night-queue playback controller.
  * Plays one track at a time so tanda tracks advance, then cortina, then next tanda.
+ *
+ * Progress ticks call onProgress (cheap); structural changes call onChange.
  */
 
 import type {
@@ -16,96 +18,46 @@ import {
   playUris,
   resumePlayback,
   seekPlayback,
-  setPlaybackVolume,
   setRepeatMode,
 } from "./spotifyConnect";
 import { findLocalFallback } from "@/lib/tracks";
+import {
+  CORTINA_FADE_MS,
+  DEFAULT_CORTINA_SECONDS,
+  DEFAULT_GAP_SECONDS,
+  END_EPSILON_MS,
+  PROGRESS_TICK_MS,
+  SPOTIFY_POLL_MS,
+} from "./constants";
+import {
+  buildNextLabel,
+  estimateRemainingMs,
+  flattenTracksForItem,
+  formatMs,
+  nextPlayableQueueIndex,
+  prevPlayableQueueIndex,
+  resolveUpcoming,
+  sleep,
+} from "./queueHelpers";
+import {
+  evaluateLocalProgress,
+  evaluateSpotifyPoll,
+} from "./spotifyEndDetection";
+import { VolumeControl } from "./volumeControl";
+import type {
+  NowPlayingInfo,
+  PlaybackCursor,
+  QueueControllerDeps,
+  QueueControllerStatus,
+} from "./types";
 
-export type QueueControllerStatus =
-  | "idle"
-  | "playing"
-  | "paused"
-  | "loading"
-  | "error";
-
-export interface PlaybackCursor {
-  queueIndex: number;
-  /** Within current tanda; 0 for cortina */
-  trackIndex: number;
-}
-
-export interface NowPlayingInfo {
-  track: Track;
-  source: TrackSource;
-  usedFallback?: boolean;
-  queueItem: EventQueueItem;
-  queueIndex: number;
-  trackIndex: number;
-  tanda?: Tanda | null;
-  nextLabel?: string | null;
-  progressMs: number;
-  durationMs: number;
-  albumArtUrl: string | null;
-  volumePercent: number;
-}
-
-export interface QueueControllerDeps {
-  getAccessToken: () => Promise<string | null>;
-  getDeviceId: () => string | null;
-  resolveLocalFile: (track: Track) => Promise<File | Blob | null>;
-  onChange?: () => void;
-  onError?: (message: string) => void;
-}
-
-const DEFAULT_CORTINA_SECONDS = 45;
-const DEFAULT_GAP_SECONDS = 2;
-/** Fade cortina over the last N ms before cutting to the next tanda. */
-const CORTINA_FADE_MS = 6000;
-/** Volume steps during cortina fade (kept low to stay under Spotify rate limits). */
-const CORTINA_FADE_STEPS = 5;
-/** How often we ask Spotify for player state (UI progress is interpolated locally). */
-const SPOTIFY_POLL_MS = 2000;
-/** Local progress tick for smooth UI between Spotify polls. */
-const PROGRESS_TICK_MS = 250;
-/** Schedule precise end when this much remains (wider than poll interval). */
-const NEAR_END_SCHEDULE_MS = 4000;
-/** Advance when this much of the track remains (ms). */
-const END_EPSILON_MS = 100;
-/**
- * Spotify metadata duration is sometimes longer than the real audio
- * (e.g. listed 2:57, audio ends ~2:50). After a jump to 0:00 / stop,
- * wait this long before treating it as end-of-track.
- */
-const PREMATURE_END_CONFIRM_MS = 2500;
-/** Need at least this much playback before premature-end logic can fire. */
-const MIN_PEAK_FOR_PREMATURE_MS = 20_000;
-
-function flattenTracksForItem(
-  item: EventQueueItem,
-  tandasById: Map<string, Tanda>,
-  tracksById: Map<string, Track>
-): Track[] {
-  if (item.type === "cortina") {
-    const t = item.trackId ? tracksById.get(item.trackId) : undefined;
-    return t ? [t] : [];
-  }
-  const tanda = item.tandaId ? tandasById.get(item.tandaId) : undefined;
-  if (!tanda) return [];
-  return tanda.trackIds
-    .map((id) => tracksById.get(id))
-    .filter((t): t is Track => !!t);
-}
-
-function formatMs(ms: number): string {
-  const totalSec = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+export type {
+  NowPlayingInfo,
+  PlaybackCursor,
+  PlaybackProgress,
+  QueueControllerDeps,
+  QueueControllerStatus,
+} from "./types";
 
 export { formatMs };
 
@@ -132,14 +84,9 @@ export class QueueController {
   private gapSeconds = DEFAULT_GAP_SECONDS;
   private expectedSpotifyUri: string | null = null;
   private nearEndSeen = false;
-  private baseVolume = 100;
-  /** Last volume percent successfully sent to Spotify (skip redundant PUTs). */
-  private lastSpotifyVolume: number | null = null;
-  /** Device id last used for volume (invalidate cache on device switch). */
-  private lastVolumeDeviceId: string | null = null;
   /** Device id we already set repeat=off for (once per device). */
   private repeatOffForDevice: string | null = null;
-  private fading = false;
+  private volume: VolumeControl;
   private playGeneration = 0;
   private endTimer: ReturnType<typeof setTimeout> | null = null;
   /** While true, keep Spotify/local at 0 until the next track is actually started. */
@@ -157,6 +104,12 @@ export class QueueController {
   private lastProgressTickAt = 0;
 
   constructor(private deps: QueueControllerDeps) {
+    this.volume = new VolumeControl(
+      () => this.deps.getAccessToken(),
+      () => this.deps.getDeviceId(),
+      () => this.activeSource,
+      this.local
+    );
     this.local.setEndedHandler(() => {
       void this.onNaturalTrackEnd();
     });
@@ -166,6 +119,18 @@ export class QueueController {
       this.deps.onError?.(msg);
       this.notify();
     });
+  }
+
+  private get fading() {
+    return this.volume.fading;
+  }
+
+  private get baseVolume() {
+    return this.volume.baseVolume;
+  }
+
+  private set baseVolume(v: number) {
+    this.volume.baseVolume = v;
   }
 
   loadQueue(
@@ -178,7 +143,16 @@ export class QueueController {
     this.items = items;
     this.tandasById = new Map(tandas.map((t) => [t.id, t]));
     this.tracksById = new Map(tracks.map((t) => [t.id, t]));
-    this.cursor = startAt;
+    const playable = nextPlayableQueueIndex(
+      items,
+      startAt.queueIndex,
+      this.tandasById,
+      this.tracksById
+    );
+    this.cursor = {
+      queueIndex: playable >= 0 ? playable : startAt.queueIndex,
+      trackIndex: playable >= 0 ? 0 : startAt.trackIndex,
+    };
     this.status = "idle";
     this.error = null;
     this.progressMs = 0;
@@ -219,7 +193,7 @@ export class QueueController {
     const clamped = Math.min(100, Math.max(0, Math.round(percent)));
     this.baseVolume = clamped;
     if (!this.fading && !this.holdSilent) {
-      await this.applyVolume(clamped);
+      await this.volume.applyVolume(clamped);
     }
     this.notify();
   }
@@ -236,6 +210,25 @@ export class QueueController {
     return { ...this.cursor };
   }
 
+  getProgress(): { progressMs: number; durationMs: number } {
+    const item = this.items[this.cursor.queueIndex];
+    const track =
+      this.playingOverride ??
+      (item
+        ? flattenTracksForItem(item, this.tandasById, this.tracksById)[
+            this.cursor.trackIndex
+          ]
+        : undefined);
+    const durationMs =
+      item?.type === "cortina"
+        ? Math.min(
+            this.durationMs || this.cortinaSeconds * 1000,
+            this.cortinaSeconds * 1000
+          )
+        : this.durationMs || track?.durationMs || 0;
+    return { progressMs: this.progressMs, durationMs };
+  }
+
   getNowPlaying(): NowPlayingInfo | null {
     const item = this.items[this.cursor.queueIndex];
     if (!item) return null;
@@ -248,20 +241,36 @@ export class QueueController {
         ? this.tandasById.get(item.tandaId) ?? null
         : null;
 
-    let nextLabel: string | null = null;
-    if (this.cursor.trackIndex + 1 < tracks.length) {
-      nextLabel = tracks[this.cursor.trackIndex + 1]?.name ?? null;
-    } else {
-      const nextItem = this.items[this.cursor.queueIndex + 1];
-      if (nextItem?.type === "cortina") {
-        const ct = nextItem.trackId
-          ? this.tracksById.get(nextItem.trackId)
-          : null;
-        nextLabel = ct ? `Cortina · ${ct.name}` : "Cortina";
-      } else if (nextItem?.type === "tanda" && nextItem.tandaId) {
-        nextLabel = this.tandasById.get(nextItem.tandaId)?.name ?? "Next tanda";
-      }
-    }
+    const nextLabel = buildNextLabel(
+      item,
+      this.cursor.trackIndex,
+      this.cursor.queueIndex,
+      this.items,
+      this.tandasById,
+      this.tracksById
+    );
+
+    const upcoming = resolveUpcoming(
+      item,
+      this.cursor.trackIndex,
+      this.cursor.queueIndex,
+      this.items,
+      this.tandasById,
+      this.tracksById,
+      this.cortinaSeconds
+    );
+
+    const { progressMs, durationMs } = this.getProgress();
+    const remainingQueueMs = estimateRemainingMs(
+      this.items,
+      this.cursor.queueIndex,
+      this.cursor.trackIndex,
+      this.tandasById,
+      this.tracksById,
+      this.cortinaSeconds,
+      progressMs,
+      durationMs
+    );
 
     return {
       track,
@@ -272,14 +281,10 @@ export class QueueController {
       trackIndex: this.cursor.trackIndex,
       tanda,
       nextLabel,
-      progressMs: this.progressMs,
-      durationMs:
-        item.type === "cortina"
-          ? Math.min(
-              this.durationMs || this.cortinaSeconds * 1000,
-              this.cortinaSeconds * 1000
-            )
-          : this.durationMs || track.durationMs || 0,
+      upcoming,
+      remainingQueueMs,
+      progressMs,
+      durationMs,
       albumArtUrl: this.liveAlbumArtUrl ?? track.albumArtUrl ?? null,
       volumePercent: this.baseVolume,
     };
@@ -398,9 +403,19 @@ export class QueueController {
 
   async jumpTo(queueIndex: number, trackIndex = 0): Promise<void> {
     if (queueIndex < 0 || queueIndex >= this.items.length) return;
+    const playable = nextPlayableQueueIndex(
+      this.items,
+      queueIndex,
+      this.tandasById,
+      this.tracksById
+    );
+    if (playable < 0) return;
     this.clearGapTimer();
     this.stopEngines();
-    this.cursor = { queueIndex, trackIndex };
+    this.cursor = {
+      queueIndex: playable,
+      trackIndex: playable === queueIndex ? trackIndex : 0,
+    };
     await this.play();
   }
 
@@ -472,13 +487,31 @@ export class QueueController {
 
   private async goToQueueItem(queueIndex: number): Promise<void> {
     if (this.advancing) return;
-    if (queueIndex < 0 || queueIndex >= this.items.length) return;
+    if (queueIndex < 0 || queueIndex >= this.items.length) {
+      // Try previous direction via prevPlayable when going backward past start
+      return;
+    }
+    const forward = queueIndex >= this.cursor.queueIndex;
+    const playable = forward
+      ? nextPlayableQueueIndex(
+          this.items,
+          queueIndex,
+          this.tandasById,
+          this.tracksById
+        )
+      : prevPlayableQueueIndex(
+          this.items,
+          queueIndex,
+          this.tandasById,
+          this.tracksById
+        );
+    if (playable < 0) return;
     this.advancing = true;
     this.clearCortinaTimer();
     this.clearGapTimer();
     this.clearEndTimer();
     try {
-      this.cursor = { queueIndex, trackIndex: 0 };
+      this.cursor = { queueIndex: playable, trackIndex: 0 };
       this.holdSilent = false;
       await this.play();
     } finally {
@@ -528,8 +561,20 @@ export class QueueController {
       }
 
       // Last track of tanda → cortina (or next item): keep the gap silence
+      const nextQi = nextPlayableQueueIndex(
+        this.items,
+        this.cursor.queueIndex + 1,
+        this.tandasById,
+        this.tracksById
+      );
+      if (nextQi < 0) {
+        this.stopEngines();
+        this.status = "idle";
+        this.notify();
+        return;
+      }
       this.cursor = {
-        queueIndex: this.cursor.queueIndex + 1,
+        queueIndex: nextQi,
         trackIndex: 0,
       };
       if (this.gapSeconds > 0) {
@@ -572,7 +617,7 @@ export class QueueController {
     this.durationMs = track.durationMs ?? 0;
     this.liveAlbumArtUrl = track.albumArtUrl ?? null;
     this.nearEndSeen = false;
-    this.fading = false;
+    this.volume.fading = false;
     this.expectedSpotifyUri = null;
     this.playIssuedAt = 0;
     this.confirmedPlaying = false;
@@ -598,9 +643,9 @@ export class QueueController {
     // After cortina fade: stay at 0 until the NEW uri is playing.
     // Otherwise raise to x first (normal tanda track changes).
     if (!startSilent) {
-      await this.applyVolume(this.baseVolume);
+      await this.volume.applyVolume(this.baseVolume);
     } else {
-      await this.applyVolume(0);
+      await this.volume.applyVolume(0);
     }
 
     if (track.source === "spotify") {
@@ -627,8 +672,59 @@ export class QueueController {
 
     // Safe to restore volume — new track is active / loaded
     this.holdSilent = false;
-    await this.applyVolume(this.baseVolume);
+    await this.volume.applyVolume(this.baseVolume);
     this.scheduleCortinaCutIfNeeded(item);
+    void this.warmUpcoming();
+  }
+
+  /**
+   * Warm the next local file into a paused Audio element, and prefetch Spotify art.
+   * Never issues Connect play() — that would steal the active stream.
+   */
+  private async warmUpcoming(): Promise<void> {
+    const item = this.items[this.cursor.queueIndex];
+    if (!item) {
+      this.local.clearWarm();
+      return;
+    }
+    const upcoming = resolveUpcoming(
+      item,
+      this.cursor.trackIndex,
+      this.cursor.queueIndex,
+      this.items,
+      this.tandasById,
+      this.tracksById,
+      this.cortinaSeconds
+    );
+    const track = upcoming?.track;
+    if (!track) {
+      this.local.clearWarm();
+      return;
+    }
+
+    if (track.albumArtUrl && typeof Image !== "undefined") {
+      try {
+        const img = new Image();
+        img.decoding = "async";
+        img.src = track.albumArtUrl;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (track.source === "local") {
+      try {
+        const file = await this.deps.resolveLocalFile(track);
+        if (file) await this.local.warmFile(track.id, file);
+        else this.local.clearWarm();
+      } catch {
+        this.local.clearWarm();
+      }
+      return;
+    }
+
+    // Spotify: URI is already known on the track; Connect cannot preload silently.
+    this.local.clearWarm();
   }
 
   private scheduleCortinaCutIfNeeded(item?: EventQueueItem) {
@@ -659,12 +755,12 @@ export class QueueController {
     this.clearEndTimer();
     this.holdSilent = true;
     try {
-      await this.runVolumeFade(fadeMs);
-      await this.applyVolume(0);
+      await this.volume.runFade(fadeMs);
+      await this.volume.applyVolume(0);
       await this.pauseEnginesQuietly();
       // Extra silence guard — Spotify sometimes buffers a few ms after pause
       await sleep(80);
-      await this.applyVolume(0);
+      await this.volume.applyVolume(0);
 
       if (this.cursor.queueIndex + 1 >= this.items.length) {
         this.holdSilent = false;
@@ -674,8 +770,22 @@ export class QueueController {
         return;
       }
 
+      const nextQi = nextPlayableQueueIndex(
+        this.items,
+        this.cursor.queueIndex + 1,
+        this.tandasById,
+        this.tracksById
+      );
+      if (nextQi < 0) {
+        this.holdSilent = false;
+        this.stopEngines();
+        this.status = "idle";
+        this.notify();
+        return;
+      }
+
       this.cursor = {
-        queueIndex: this.cursor.queueIndex + 1,
+        queueIndex: nextQi,
         trackIndex: 0,
       };
       // holdSilent stays true through play() so volume stays 0 until new URI
@@ -683,54 +793,6 @@ export class QueueController {
     } finally {
       this.holdSilent = false;
       this.advancing = false;
-    }
-  }
-
-  private async runVolumeFade(durationMs: number): Promise<void> {
-    if (this.fading) return;
-    this.fading = true;
-    const from = this.baseVolume;
-    const ms = Math.max(400, durationMs);
-    const steps = CORTINA_FADE_STEPS;
-    const stepMs = Math.max(80, Math.floor(ms / steps));
-    try {
-      for (let i = steps - 1; i >= 0; i--) {
-        const pct = Math.round((i / steps) * from);
-        await this.applyVolume(pct);
-        await sleep(stepMs);
-      }
-      await this.applyVolume(0);
-    } finally {
-      this.fading = false;
-    }
-  }
-
-  private async applyVolume(percent: number): Promise<void> {
-    const clamped = Math.min(100, Math.max(0, Math.round(percent)));
-    if (this.activeSource === "local" || !this.activeSource) {
-      this.local.setVolume(clamped / 100);
-    }
-    if (this.activeSource === "spotify") {
-      await this.ensureSpotifyVolume(clamped);
-    }
-  }
-
-  /** Skip Spotify volume PUTs when the device already has this level. */
-  private async ensureSpotifyVolume(percent: number): Promise<void> {
-    const clamped = Math.min(100, Math.max(0, Math.round(percent)));
-    const deviceId = this.deps.getDeviceId();
-    if (deviceId !== this.lastVolumeDeviceId) {
-      this.lastSpotifyVolume = null;
-      this.lastVolumeDeviceId = deviceId;
-    }
-    if (this.lastSpotifyVolume === clamped) return;
-    const token = await this.deps.getAccessToken();
-    if (!token) return;
-    try {
-      await setPlaybackVolume(token, clamped, deviceId);
-      this.lastSpotifyVolume = clamped;
-    } catch {
-      /* ignore volume errors (incl. rate limit) — don't block playback */
     }
   }
 
@@ -789,7 +851,7 @@ export class QueueController {
     }
 
     // Critical: when coming from cortina fade, keep device at 0 until URI switches
-    await this.ensureSpotifyVolume(startSilent ? 0 : this.baseVolume);
+    await this.volume.ensureSpotifyVolume(startSilent ? 0 : this.baseVolume);
     await playUris(token, [track.spotifyUri], deviceId);
 
     this.activeSource = "spotify";
@@ -805,7 +867,7 @@ export class QueueController {
     if (startSilent) {
       await this.waitForSpotifyUri(token, track.spotifyUri);
       // Still silent — volume restore happens in playTrack after this returns
-      await this.ensureSpotifyVolume(0);
+      await this.volume.ensureSpotifyVolume(0);
     }
 
     this.startSpotifyPoll();
@@ -823,7 +885,7 @@ export class QueueController {
     this.expectedSpotifyUri = null;
     this.liveAlbumArtUrl = track.albumArtUrl ?? null;
     this.local.setVolume(startSilent ? 0 : this.baseVolume / 100);
-    await this.local.playFile(file);
+    await this.local.playFile(file, track.id);
     this.startLocalPoll();
   }
 
@@ -838,24 +900,27 @@ export class QueueController {
       }
 
       const item = this.items[this.cursor.queueIndex];
-      if (item?.type === "cortina") {
-        const limitMs = this.cortinaSeconds * 1000;
-        const fadeStart = Math.max(0, limitMs - CORTINA_FADE_MS);
-        if (!this.fading && this.progressMs >= fadeStart) {
-          void this.finishCortinaWithFade();
-          return;
-        }
-      } else if (this.durationMs > 0) {
-        const remaining = this.durationMs - this.progressMs;
-        if (remaining <= END_EPSILON_MS) {
-          void this.onNaturalTrackEnd();
-          return;
-        }
-        if (remaining < NEAR_END_SCHEDULE_MS && !this.endTimer) {
-          this.schedulePreciseEnd(remaining);
-        }
+      const decision = evaluateLocalProgress({
+        progressMs: this.progressMs,
+        durationMs: this.durationMs,
+        isCortina: item?.type === "cortina",
+        cortinaSeconds: this.cortinaSeconds,
+        fading: this.fading,
+        hasEndTimer: !!this.endTimer,
+      });
+
+      if (decision.kind === "cortina_fade") {
+        void this.finishCortinaWithFade();
+        return;
       }
-      this.notify();
+      if (decision.kind === "advance") {
+        void this.onNaturalTrackEnd();
+        return;
+      }
+      if (decision.kind === "schedule_end") {
+        this.schedulePreciseEnd(decision.remainingMs);
+      }
+      this.notifyProgress();
     }, 250);
   }
 
@@ -879,241 +944,80 @@ export class QueueController {
           const deviceId = this.deps.getDeviceId();
           const item = this.items[this.cursor.queueIndex];
 
-          // No active Spotify session — treat as end if we already played near the end
-          if (!state) {
-            if (this.nearEndSeen) {
+          const result = evaluateSpotifyPoll({
+            state,
+            now: Date.now(),
+            progressMs: this.progressMs,
+            durationMs: this.durationMs,
+            peakProgressMs: this.peakProgressMs,
+            confirmedPlaying: this.confirmedPlaying,
+            nearEndSeen: this.nearEndSeen,
+            prematureEndSince: this.prematureEndSince,
+            stuckRetryDone: this.stuckRetryDone,
+            playIssuedAt: this.playIssuedAt,
+            expectedSpotifyUri: this.expectedSpotifyUri,
+            liveAlbumArtUrl: this.liveAlbumArtUrl,
+            baseVolume: this.baseVolume,
+            fading: this.fading,
+            holdSilent: this.holdSilent,
+            isCortina: item?.type === "cortina",
+            cortinaSeconds: this.cortinaSeconds,
+            hasEndTimer: !!this.endTimer,
+          });
+
+          const s = result.snapshot;
+          this.progressMs = s.progressMs;
+          this.durationMs = s.durationMs;
+          this.peakProgressMs = s.peakProgressMs;
+          this.confirmedPlaying = s.confirmedPlaying;
+          this.nearEndSeen = s.nearEndSeen;
+          this.prematureEndSince = s.prematureEndSince;
+          this.stuckRetryDone = s.stuckRetryDone;
+          this.playIssuedAt = s.playIssuedAt;
+          this.liveAlbumArtUrl = s.liveAlbumArtUrl;
+          if (s.learnedVolume != null) {
+            this.baseVolume = s.learnedVolume;
+            this.volume.lastSpotifyVolume = s.learnedVolume;
+          }
+          if (state) this.lastProgressTickAt = Date.now();
+
+          if (result.clearEndTimer) this.clearEndTimer();
+          if (result.scheduleEndMs != null) {
+            this.schedulePreciseEnd(result.scheduleEndMs);
+          }
+
+          const action = result.action;
+          if (action.kind === "advance") {
+            await this.onNaturalTrackEnd();
+            return;
+          }
+          if (action.kind === "cortina_fade") {
+            this.clearCortinaTimer();
+            await this.finishCortinaWithFade();
+            return;
+          }
+          if (action.kind === "retry_play") {
+            try {
+              await playUris(token, [action.uri], deviceId);
+            } catch (e) {
+              const msg =
+                e instanceof Error ? e.message : "Spotify play failed";
+              this.error = msg;
+              this.deps.onError?.(`${msg} — skipping unplayable track.`);
               this.clearEndTimer();
-              this.nearEndSeen = false;
-              this.prematureEndSince = null;
               await this.onNaturalTrackEnd();
-              return;
-            }
-            if (
-              this.confirmedPlaying &&
-              this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS
-            ) {
-              if (this.prematureEndSince == null) {
-                this.prematureEndSince = Date.now();
-              } else if (
-                Date.now() - this.prematureEndSince >=
-                PREMATURE_END_CONFIRM_MS
-              ) {
-                this.prematureEndSince = null;
-                this.clearEndTimer();
-                await this.onNaturalTrackEnd();
-              }
             }
             return;
           }
-
-          const uri = state.item?.uri ?? null;
-          const progress = state.progress_ms ?? 0;
-          const duration =
-            state.item?.duration_ms ??
-            (this.durationMs > 0 ? this.durationMs : 0);
-          this.progressMs = progress;
-          if (duration > 0) this.durationMs = duration;
-          if (progress > this.peakProgressMs) this.peakProgressMs = progress;
-          this.lastProgressTickAt = Date.now();
-
-          const art =
-            state.item?.album?.images?.[0]?.url ??
-            state.item?.album?.images?.[1]?.url ??
-            null;
-          if (art) this.liveAlbumArtUrl = art;
-
-          // Learn user volume from Spotify (knob / app) when not fading
-          const deviceVol = state.device?.volume_percent;
-          if (
-            !this.fading &&
-            !this.holdSilent &&
-            typeof deviceVol === "number" &&
-            deviceVol !== this.baseVolume
-          ) {
-            this.baseVolume = Math.min(100, Math.max(0, deviceVol));
-            this.lastSpotifyVolume = this.baseVolume;
-          }
-
-          if (state.is_playing && progress > 500) {
-            this.confirmedPlaying = true;
-          }
-
-          const uriMatches =
-            !this.expectedSpotifyUri ||
-            !uri ||
-            uri === this.expectedSpotifyUri;
-
-          // Stuck at 0:00 — play accepted but device never started (restricted / flaky)
-          if (
-            uriMatches &&
-            !state.is_playing &&
-            progress < 1500 &&
-            !this.confirmedPlaying &&
-            this.playIssuedAt > 0 &&
-            Date.now() - this.playIssuedAt > 3500
-          ) {
-            if (!this.stuckRetryDone && this.expectedSpotifyUri) {
-              this.stuckRetryDone = true;
-              this.playIssuedAt = Date.now();
-              try {
-                await playUris(
-                  token,
-                  [this.expectedSpotifyUri],
-                  deviceId
-                );
-              } catch (e) {
-                const msg =
-                  e instanceof Error ? e.message : "Spotify play failed";
-                this.error = msg;
-                this.deps.onError?.(
-                  `${msg} — skipping unplayable track.`
-                );
-                this.clearEndTimer();
-                await this.onNaturalTrackEnd();
-              }
-              return;
-            }
-            if (Date.now() - this.playIssuedAt > 3500) {
-              this.deps.onError?.(
-                "Spotify did not start this track — skipping."
-              );
-              this.clearEndTimer();
-              await this.onNaturalTrackEnd();
-              return;
-            }
-          }
-
-          // Same URI restarted from the beginning after near-end (repeat / auto-restart)
-          if (
-            this.nearEndSeen &&
-            uriMatches &&
-            progress < 2500 &&
-            this.confirmedPlaying
-          ) {
-            this.nearEndSeen = false;
-            this.prematureEndSince = null;
+          if (action.kind === "skip_unplayable") {
+            this.deps.onError?.(action.message);
             this.clearEndTimer();
             await this.onNaturalTrackEnd();
             return;
           }
 
-          // Metadata longer than real audio (e.g. 2:57 listed, ends ~2:50):
-          // peak is close to true end but not within a few seconds of duration.
-          const closeToListedEnd =
-            duration > 0 &&
-            this.peakProgressMs >= Math.max(0, duration - 12_000);
-          if (
-            this.confirmedPlaying &&
-            uriMatches &&
-            progress < 2000 &&
-            closeToListedEnd
-          ) {
-            this.nearEndSeen = false;
-            this.prematureEndSince = null;
-            this.clearEndTimer();
-            await this.onNaturalTrackEnd();
-            return;
-          }
-
-          // Premature stop / jump-to-0: confirm silence, then advance (gap applies in onNaturalTrackEnd)
-          const jumpedToStart =
-            this.confirmedPlaying &&
-            uriMatches &&
-            progress < 2000 &&
-            this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS &&
-            this.peakProgressMs - progress > 15_000;
-          const stoppedWithTimeLeft =
-            this.confirmedPlaying &&
-            uriMatches &&
-            !state.is_playing &&
-            this.peakProgressMs >= MIN_PEAK_FOR_PREMATURE_MS &&
-            duration > 0 &&
-            duration - progress > 5000 &&
-            progress >= 5000;
-
-          if (jumpedToStart || stoppedWithTimeLeft) {
-            if (this.prematureEndSince == null) {
-              this.prematureEndSince = Date.now();
-            } else if (
-              Date.now() - this.prematureEndSince >=
-              PREMATURE_END_CONFIRM_MS
-            ) {
-              this.prematureEndSince = null;
-              this.nearEndSeen = false;
-              this.clearEndTimer();
-              await this.onNaturalTrackEnd();
-              return;
-            }
-          } else if (state.is_playing && progress > 3000) {
-            this.prematureEndSince = null;
-          }
-
-          // Finished: Spotify stops near end (progress still high)
-          if (
-            this.confirmedPlaying &&
-            !state.is_playing &&
-            uriMatches &&
-            this.nearEndSeen &&
-            duration > 0 &&
-            progress >= duration - 2000
-          ) {
-            this.nearEndSeen = false;
-            this.prematureEndSince = null;
-            this.clearEndTimer();
-            await this.onNaturalTrackEnd();
-            return;
-          }
-
-          if (item?.type === "cortina") {
-            const limitMs = this.cortinaSeconds * 1000;
-            const fadeStart = Math.max(0, limitMs - CORTINA_FADE_MS);
-            if (!this.fading && progress >= fadeStart) {
-              this.clearCortinaTimer();
-              await this.finishCortinaWithFade();
-              return;
-            }
-            this.notify();
-            return;
-          }
-
-          if (duration > 0) {
-            const remaining = duration - progress;
-            // progress can be 0 at true end — still treat as finished if we were near end
-            if (
-              remaining <= END_EPSILON_MS ||
-              (progress === 0 &&
-                this.nearEndSeen &&
-                this.confirmedPlaying &&
-                !state.is_playing)
-            ) {
-              this.nearEndSeen = false;
-              this.clearEndTimer();
-              await this.onNaturalTrackEnd();
-              return;
-            }
-
-            if (progress > 0) {
-              if (remaining < NEAR_END_SCHEDULE_MS) {
-                this.nearEndSeen = true;
-                if (!this.endTimer) this.schedulePreciseEnd(remaining);
-              } else {
-                this.nearEndSeen = false;
-                this.clearEndTimer();
-              }
-
-              if (
-                this.confirmedPlaying &&
-                !state.is_playing &&
-                remaining < 2000
-              ) {
-                this.clearEndTimer();
-                await this.onNaturalTrackEnd();
-                return;
-              }
-            }
-          }
-
-          this.notify();
+          if (action.structural) this.notify();
+          else this.notifyProgress();
         } catch {
           /* ignore transient poll errors */
         }
@@ -1157,27 +1061,30 @@ export class QueueController {
       }
 
       const item = this.items[this.cursor.queueIndex];
-      if (item?.type === "cortina") {
-        const limitMs = this.cortinaSeconds * 1000;
-        const fadeStart = Math.max(0, limitMs - CORTINA_FADE_MS);
-        if (!this.fading && this.progressMs >= fadeStart) {
-          this.clearCortinaTimer();
-          void this.finishCortinaWithFade();
-          return;
-        }
-      } else if (this.durationMs > 0) {
-        const remaining = this.durationMs - this.progressMs;
-        if (remaining <= END_EPSILON_MS) {
-          void this.onNaturalTrackEnd();
-          return;
-        }
-        if (remaining < NEAR_END_SCHEDULE_MS && !this.endTimer) {
-          this.nearEndSeen = true;
-          this.schedulePreciseEnd(remaining);
-        }
+      const decision = evaluateLocalProgress({
+        progressMs: this.progressMs,
+        durationMs: this.durationMs,
+        isCortina: item?.type === "cortina",
+        cortinaSeconds: this.cortinaSeconds,
+        fading: this.fading,
+        hasEndTimer: !!this.endTimer,
+      });
+
+      if (decision.kind === "cortina_fade") {
+        this.clearCortinaTimer();
+        void this.finishCortinaWithFade();
+        return;
+      }
+      if (decision.kind === "advance") {
+        void this.onNaturalTrackEnd();
+        return;
+      }
+      if (decision.kind === "schedule_end") {
+        this.nearEndSeen = true;
+        this.schedulePreciseEnd(decision.remainingMs);
       }
 
-      this.notify();
+      this.notifyProgress();
     }, PROGRESS_TICK_MS);
   }
 
@@ -1210,7 +1117,7 @@ export class QueueController {
     this.liveAlbumArtUrl = null;
     this.expectedSpotifyUri = null;
     this.nearEndSeen = false;
-    this.fading = false;
+    this.volume.fading = false;
     this.holdSilent = false;
     this.playIssuedAt = 0;
     this.confirmedPlaying = false;
@@ -1222,5 +1129,10 @@ export class QueueController {
 
   private notify() {
     this.deps.onChange?.();
+    this.deps.onProgress?.();
+  }
+
+  private notifyProgress() {
+    this.deps.onProgress?.();
   }
 }

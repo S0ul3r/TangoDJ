@@ -4,65 +4,16 @@ import { useEffect, useMemo } from "react";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { DevicePicker } from "@/components/DevicePicker";
+import { KeyboardShortcutsHint } from "@/components/playback/KeyboardShortcutsHint";
+import { PlaybackTimingSettings } from "@/components/playback/PlaybackTimingSettings";
+import { SeekBar } from "@/components/playback/SeekBar";
+import { TransportControls } from "@/components/playback/TransportControls";
+import { UpcomingCard } from "@/components/playback/UpcomingCard";
+import { VolumeIcon } from "@/components/playback/TransportIcons";
 import { useLibrary } from "@/context/LibraryContext";
 import { usePlayback } from "@/context/PlaybackContext";
-import { formatMs } from "@/lib/playback/queueController";
-
-function PlayIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M8 5.14v13.72a1 1 0 0 0 1.5.86l11-6.86a1 1 0 0 0 0-1.72l-11-6.86a1 1 0 0 0-1.5.86z" />
-    </svg>
-  );
-}
-
-function PauseIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z" />
-    </svg>
-  );
-}
-
-function PrevIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6 6h2v12H6V6zm3.5 6 8.5 6V6l-8.5 6z" />
-    </svg>
-  );
-}
-
-function NextIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M16 6h2v12h-2V6zM6 18l8.5-6L6 6v12z" />
-    </svg>
-  );
-}
-
-function SkipItemPrevIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M11 18V6l-8.5 6L11 18zm.5-6 8.5 6V6l-8.5 6z" />
-    </svg>
-  );
-}
-
-function SkipItemNextIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M3 6v12l8.5-6L3 6zm9.5 0v12L21 12l-8.5-6z" />
-    </svg>
-  );
-}
-
-function VolumeIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M5 9v6h4l5 5V4L9 9H5zm11.5 3c0-1.77-1-3.29-2.5-4.03v8.05c1.5-.73 2.5-2.25 2.5-4.02z" />
-    </svg>
-  );
-}
+import { useDjKeyboardShortcuts } from "@/hooks/useDjKeyboardShortcuts";
+import { formatDurationLong } from "@/lib/playback/queueHelpers";
 
 export default function DjPage() {
   const { events, tandas, tracks } = useLibrary();
@@ -79,7 +30,6 @@ export default function DjPage() {
     nextQueueItem,
     previousQueueItem,
     jumpTo,
-    seek,
     refreshDevices,
     cortinaSeconds,
     setCortinaSeconds,
@@ -98,6 +48,24 @@ export default function DjPage() {
     [tracks]
   );
 
+  const keyboardHandlers = useMemo(
+    () => ({
+      togglePlayPause: () => void togglePlayPause(),
+      skipTrack: () => void skipTrack(),
+      previousTrack: () => void previousTrack(),
+      nextQueueItem: () => void nextQueueItem(),
+      previousQueueItem: () => void previousQueueItem(),
+    }),
+    [
+      togglePlayPause,
+      skipTrack,
+      previousTrack,
+      nextQueueItem,
+      previousQueueItem,
+    ]
+  );
+  useDjKeyboardShortcuts(keyboardHandlers);
+
   useEffect(() => {
     void refreshDevices();
   }, [refreshDevices]);
@@ -112,19 +80,12 @@ export default function DjPage() {
   };
 
   const isPlaying = status === "playing";
-  const progressMs = nowPlaying?.progressMs ?? 0;
-  const durationMs = nowPlaying?.durationMs ?? 0;
-  const progressPct =
-    durationMs > 0 ? Math.min(100, (progressMs / durationMs) * 100) : 0;
   const albumArt = nowPlaying?.albumArtUrl;
   const volume = nowPlaying?.volumePercent ?? volumePercent;
-
-  const onSeekClick = (e: React.MouseEvent<HTMLButtonElement>) => {
-    if (durationMs <= 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    void seek(ratio * durationMs);
-  };
+  const remainingLabel =
+    nowPlaying?.remainingQueueMs != null && nowPlaying.remainingQueueMs > 0
+      ? formatDurationLong(nowPlaying.remainingQueueMs)
+      : null;
 
   return (
     <AppShell>
@@ -135,150 +96,111 @@ export default function DjPage() {
       </div>
 
       <div className="mb-6 grid gap-4 lg:grid-cols-[1fr_260px]">
-        <div className="relative rounded border border-border bg-surface/60 p-5">
-          {/* Album art — top-right, sized so timeline clears below it */}
-          <div className="absolute right-5 top-5 aspect-square w-[120px] overflow-hidden rounded-md bg-black sm:w-[132px]">
-            {albumArt ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={albumArt}
-                alt=""
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center text-xs text-muted">
-                No artwork
-              </div>
-            )}
-          </div>
-
+        <div className="rounded border border-border bg-surface/60 p-4 sm:p-5">
           {nowPlaying ? (
-            <div className="animate-fade-up min-h-[132px] pr-[140px] sm:min-h-[144px] sm:pr-[152px]">
-              <p className="mb-1 text-xs uppercase tracking-[0.2em] text-accent">
-                Now playing · {nowPlaying.source}
-                {nowPlaying.usedFallback ? " · local fallback" : ""}
-              </p>
-
-              <h2 className="text-3xl font-semibold leading-tight sm:text-4xl">
-                {nowPlaying.track.name}
-              </h2>
-
-              <p className="mt-2 text-base text-muted">
-                {nowPlaying.track.orchestra ||
-                  nowPlaying.track.artists ||
-                  "—"}
-              </p>
-
-              <div className="mt-2 space-y-0.5 pb-5 text-sm text-muted">
-                {nowPlaying.tanda && (
-                  <p>
-                    Tanda: {nowPlaying.tanda.name} · track{" "}
-                    {nowPlaying.trackIndex + 1}/
-                    {nowPlaying.tanda.trackIds.length}
-                  </p>
+            <div className="animate-fade-up flex gap-4">
+              <div className="aspect-square w-28 shrink-0 overflow-hidden rounded-md bg-black sm:w-32">
+                {albumArt ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={albumArt}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-[10px] text-muted">
+                    No art
+                  </div>
                 )}
-                {nowPlaying.queueItem.type === "cortina" && (
-                  <p>
-                    Cortina · cuts after {cortinaSeconds}s (fades last 6s)
-                  </p>
-                )}
-                {nowPlaying.nextLabel && (
-                  <p>Next: {nowPlaying.nextLabel}</p>
-                )}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <p className="mb-1 text-[11px] uppercase tracking-[0.18em] text-accent">
+                  Now playing · {nowPlaying.source}
+                  {nowPlaying.usedFallback ? " · local fallback" : ""}
+                </p>
+
+                <h2 className="truncate text-2xl font-semibold leading-tight sm:text-3xl">
+                  {nowPlaying.track.name}
+                </h2>
+
+                <p className="mt-1 truncate text-sm text-muted">
+                  {nowPlaying.track.orchestra ||
+                    nowPlaying.track.artists ||
+                    "—"}
+                </p>
+
+                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted">
+                  {nowPlaying.tanda && (
+                    <span>
+                      Tanda: {nowPlaying.tanda.name} · track{" "}
+                      {nowPlaying.trackIndex + 1}/
+                      {nowPlaying.tanda.trackIds.length}
+                    </span>
+                  )}
+                  {nowPlaying.queueItem.type === "cortina" && (
+                    <span>
+                      Cortina · cuts after {cortinaSeconds}s (fades last 6s)
+                    </span>
+                  )}
+                  {remainingLabel && (
+                    <span>Night remaining ≈ {remainingLabel}</span>
+                  )}
+                </div>
               </div>
             </div>
           ) : (
-            <div className="min-h-[132px] pr-[140px] sm:min-h-[144px] sm:pr-[152px]">
-              <p className="text-xl text-muted">Nothing loaded.</p>
-              <p className="mt-1 pb-5 text-sm text-muted">
-                Build a queue in Events, or load a saved night below.
-              </p>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-lg font-medium text-foreground">
+                  Nothing in the booth yet
+                </p>
+                <p className="mt-0.5 text-sm text-muted">
+                  Load a saved event below, or build a queue in Events.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {events.slice(0, 2).map((event) => (
+                  <button
+                    key={event.id}
+                    type="button"
+                    onClick={() => loadEventQueue(event.items)}
+                    className="rounded border border-accent/50 bg-accent-soft px-3 py-1.5 text-sm text-accent hover:border-accent"
+                  >
+                    Load {event.name}
+                  </button>
+                ))}
+                <Link
+                  href="/events"
+                  className="rounded border border-border px-3 py-1.5 text-sm text-muted hover:border-accent hover:text-accent"
+                >
+                  Open Events →
+                </Link>
+              </div>
             </div>
           )}
 
-          {/* Timeline — clear of album art */}
-          <div className="mt-2">
-            <div className="flex items-center gap-3 text-xs text-muted tabular-nums">
-              <span className="w-10 shrink-0">{formatMs(progressMs)}</span>
-              <button
-                type="button"
-                onClick={onSeekClick}
-                className="relative h-3 flex-1 cursor-pointer rounded-full bg-transparent p-0"
-                aria-label="Seek"
-                title="Click to seek"
-              >
-                <span className="absolute inset-x-0 top-1/2 h-[3px] -translate-y-1/2 overflow-hidden rounded-full bg-border">
-                  <span
-                    className="absolute inset-y-0 left-0 rounded-full bg-foreground transition-[width] duration-150"
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </span>
-              </button>
-              <span className="w-10 shrink-0 text-right">
-                {formatMs(durationMs)}
-              </span>
-            </div>
+          <div className="mt-4">
+            <SeekBar />
           </div>
 
-          {/* Status left · controls centered · volume right */}
-          <div className="mt-4 grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-            <p className="justify-self-start text-xs uppercase tracking-wide text-muted">
+          <div className="mt-3 grid grid-cols-1 items-center gap-3 sm:grid-cols-[1fr_auto_1fr]">
+            <p className="justify-self-start text-xs uppercase tracking-wide text-muted sm:order-1">
               Status: {status}
               {error ? ` · ${error}` : ""}
             </p>
 
-            <div className="flex items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={() => void previousQueueItem()}
-                className="text-muted transition hover:text-foreground"
-                aria-label="Previous item"
-                title="Previous tanda / cortina"
-              >
-                <SkipItemPrevIcon className="h-5 w-5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void previousTrack()}
-                className="text-muted transition hover:text-foreground"
-                aria-label="Previous track"
-                title="Previous song in current tanda"
-              >
-                <PrevIcon className="h-5 w-5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void togglePlayPause()}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-foreground text-background transition hover:scale-105"
-                aria-label={isPlaying ? "Pause" : "Play"}
-              >
-                {isPlaying ? (
-                  <PauseIcon className="h-5 w-5" />
-                ) : (
-                  <PlayIcon className="ml-0.5 h-5 w-5" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => void skipTrack()}
-                className="text-muted transition hover:text-foreground"
-                aria-label="Next track"
-                title="Next song (or cortina / next tanda at end)"
-              >
-                <NextIcon className="h-5 w-5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void nextQueueItem()}
-                className="text-muted transition hover:text-foreground"
-                aria-label="Next item"
-                title="Next tanda / cortina"
-              >
-                <SkipItemNextIcon className="h-5 w-5" />
-              </button>
-            </div>
+            <TransportControls
+              className="sm:order-2"
+              isPlaying={isPlaying}
+              onPreviousQueueItem={() => void previousQueueItem()}
+              onPreviousTrack={() => void previousTrack()}
+              onTogglePlayPause={() => void togglePlayPause()}
+              onNextTrack={() => void skipTrack()}
+              onNextQueueItem={() => void nextQueueItem()}
+            />
 
-            <div className="flex w-full max-w-[180px] items-center justify-self-end gap-2">
+            <div className="flex w-full max-w-[180px] items-center gap-2 sm:order-3 sm:justify-self-end">
               <VolumeIcon className="h-4 w-4 shrink-0 text-muted" />
               <input
                 type="range"
@@ -296,44 +218,28 @@ export default function DjPage() {
               </span>
             </div>
           </div>
+
+          <KeyboardShortcutsHint className="mt-3 border-t border-border/60 pt-3" />
         </div>
 
-        <div className="rounded border border-border bg-surface/40 p-4">
-          <DevicePicker />
-          <label className="mt-4 block text-xs text-muted">
-            Cortina length: {cortinaSeconds}s
-          </label>
-          <input
-            type="range"
-            min={10}
-            max={200}
-            step={5}
-            value={cortinaSeconds}
-            onChange={(e) => setCortinaSeconds(Number(e.target.value))}
-            className="mt-2 w-full accent-[var(--accent)]"
-          />
-          <label className="mt-4 block text-xs text-muted">
-            Silence between songs: {gapSeconds}s
-          </label>
-          <input
-            type="range"
-            min={0}
-            max={10}
-            step={1}
-            value={gapSeconds}
-            onChange={(e) => setGapSeconds(Number(e.target.value))}
-            className="mt-2 w-full accent-[var(--accent)]"
-          />
-          <p className="mt-1 text-[11px] text-muted">
-            Applies between tanda tracks. Cortina → tanda fades with no gap.
-          </p>
-          <button
-            type="button"
-            onClick={() => void play()}
-            className="mt-4 w-full rounded border border-border py-2 text-sm hover:border-accent"
-          >
-            Start / restart from cursor
-          </button>
+        <div className="space-y-3">
+          <UpcomingCard upcoming={nowPlaying?.upcoming} />
+          <div className="rounded border border-border bg-surface/40 p-4">
+            <DevicePicker />
+            <PlaybackTimingSettings
+              cortinaSeconds={cortinaSeconds}
+              setCortinaSeconds={setCortinaSeconds}
+              gapSeconds={gapSeconds}
+              setGapSeconds={setGapSeconds}
+            />
+            <button
+              type="button"
+              onClick={() => void play()}
+              className="mt-4 w-full rounded border border-border py-2 text-sm hover:border-accent"
+            >
+              Start / restart from cursor
+            </button>
+          </div>
         </div>
       </div>
 

@@ -2,16 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/AppShell";
+import { LibraryImportPanel } from "@/components/library/LibraryImportPanel";
 import { useLibrary } from "@/context/LibraryContext";
 import { useSpotify } from "@/context/SpotifyContext";
 import { useSpotifyPlaylists } from "@/hooks/useSpotifyPlaylists";
 import { LIBRARY_IMPORT_OPEN_KEY } from "@/lib/constants";
-import { parsePlaylistId, searchTracks } from "@/lib/spotify";
-import {
-  createSpotifyTrack,
-  dedupeTracksAgainstLibrary,
-} from "@/lib/tracks";
-import type { Genre, SpotifySearchTrack, Track } from "@/types/domain";
+import type { Genre, Track } from "@/types/domain";
 import { GENRE_LABELS } from "@/types/domain";
 
 const TABS: Genre[] = ["tango", "vals", "milonga", "cortina"];
@@ -36,15 +32,10 @@ export default function LibraryPage() {
   } = useSpotifyPlaylists();
 
   const [genre, setGenre] = useState<Genre>("tango");
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SpotifySearchTrack[]>([]);
-  const [searching, setSearching] = useState(false);
   const [orchestraEdit, setOrchestraEdit] = useState<Record<string, string>>({});
+  const [yearEdit, setYearEdit] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [messageTone, setMessageTone] = useState<"ok" | "warn">("ok");
-  const [playlistUrl, setPlaylistUrl] = useState("");
-  const [selectedPlaylistId, setSelectedPlaylistId] = useState("");
-  const [importing, setImporting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // null until localStorage preference is read — avoids hide animation on remount
   const [importOpen, setImportOpen] = useState<boolean | null>(null);
@@ -60,8 +51,6 @@ export default function LibraryPage() {
       /* ignore */
     }
     setImportOpen(open);
-    // Enable transitions only after the saved open/closed state is applied,
-    // so remounts (tab switch / refresh) don't replay the hide animation.
     let cancelled = false;
     const id = requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -90,74 +79,6 @@ export default function LibraryPage() {
   const hasSelection = selectedIds.size > 0;
   const allSelected = list.length > 0 && selectedIds.size === list.length;
 
-  const onSearch = async () => {
-    if (!query.trim()) return;
-    setSearching(true);
-    setMessage(null);
-    try {
-      const token = await getValidToken();
-      if (!token) throw new Error("Not authenticated");
-      const items = await searchTracks(token, query.trim());
-      setResults(items);
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Search failed");
-      setMessageTone("warn");
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const addSpotifyTrack = async (item: SpotifySearchTrack) => {
-    const track = createSpotifyTrack(item, genre);
-    const unique = dedupeTracksAgainstLibrary([track], tracks);
-    if (!unique.length) {
-      setMessage(`“${item.name}” is already in your library.`);
-      setMessageTone("warn");
-      return;
-    }
-    await upsertTracks(unique);
-    setMessage(`Added “${item.name}” to ${GENRE_LABELS[genre]}`);
-    setMessageTone("ok");
-  };
-
-  const importPlaylist = async () => {
-    const id = selectedPlaylistId || parsePlaylistId(playlistUrl);
-    if (!id) {
-      setMessage("Paste a Spotify playlist link or pick one from the list.");
-      setMessageTone("warn");
-      return;
-    }
-    setImporting(true);
-    setMessage(null);
-    try {
-      const items = await importPlaylistTracks(id);
-      if (!items.length) {
-        setMessage(
-          "Spotify returned no tracks. You can only import playlists you own or collaborate on."
-        );
-        setMessageTone("warn");
-        return;
-      }
-      const now = new Date().toISOString();
-      const mapped = items.map((item) => createSpotifyTrack(item, genre, now));
-      const unique = dedupeTracksAgainstLibrary(mapped, tracks);
-      if (unique.length) await upsertTracks(unique);
-      const skipped = mapped.length - unique.length;
-      setMessage(
-        `Imported ${unique.length} of ${mapped.length} track${mapped.length === 1 ? "" : "s"} into ${GENRE_LABELS[genre]}${
-          skipped ? ` (${skipped} already in library)` : ""
-        }.`
-      );
-      setMessageTone("ok");
-      setPlaylistUrl("");
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Playlist import failed");
-      setMessageTone("warn");
-    } finally {
-      setImporting(false);
-    }
-  };
-
   const saveOrchestra = async (track: Track) => {
     const value = orchestraEdit[track.id] ?? track.orchestra ?? "";
     await upsertTracks([
@@ -169,34 +90,23 @@ export default function LibraryPage() {
     ]);
   };
 
-  const onImportStructuredFolder = async () => {
-    try {
-      const n = await linkLocalFolder();
-      setMessage(
-        n > 0
-          ? `Imported ${n} new local track${n === 1 ? "" : "s"} from structured library.`
-          : "No new tracks found. Use folders named Tango / Vals / Milonga / Cortina, or import into the active genre below."
-      );
-      setMessageTone(n > 0 ? "ok" : "warn");
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Folder import failed");
-      setMessageTone("warn");
+  const saveYear = async (track: Track) => {
+    const raw = yearEdit[track.id] ?? (track.year != null ? String(track.year) : "");
+    const trimmed = raw.trim();
+    let year: number | null = null;
+    if (trimmed) {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n) || n < 1800 || n > 2100) return;
+      year = Math.round(n);
     }
-  };
-
-  const onImportFlatFolder = async () => {
-    try {
-      const n = await importLocalFolderToGenre(genre);
-      setMessage(
-        n > 0
-          ? `Imported ${n} local file${n === 1 ? "" : "s"} into ${GENRE_LABELS[genre]}.`
-          : "No audio files found in that folder."
-      );
-      setMessageTone(n > 0 ? "ok" : "warn");
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Local folder import failed");
-      setMessageTone("warn");
-    }
+    if (year === track.year) return;
+    await upsertTracks([
+      {
+        ...track,
+        year,
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
   };
 
   const toggleSelect = (id: string) => {
@@ -287,169 +197,26 @@ export default function LibraryPage() {
         </button>
       </div>
 
-      <div
-        className={`collapse-panel ${isImportOpen ? "is-open" : ""} ${
-          importCanAnimate ? "can-animate" : ""
-        }`}
-        aria-hidden={!isImportOpen}
-      >
-        <div className="collapse-panel-inner">
-          <div className="space-y-6">
-            <section className="panel p-4">
-              <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
-                Link Spotify playlist → {GENRE_LABELS[genre]}
-              </h2>
-              <p className="mb-3 text-xs text-muted">
-                All tracks from the playlist are tagged as{" "}
-                <strong className="text-foreground">{GENRE_LABELS[genre]}</strong>.
-                Switch the tab above before importing vals / milonga / tango
-                lists.
-              </p>
-              {playlistsError && (
-                <p className="mb-2 text-xs text-warn">{playlistsError}</p>
-              )}
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <select
-                  value={selectedPlaylistId}
-                  onChange={(e) => {
-                    setSelectedPlaylistId(e.target.value);
-                    if (e.target.value) setPlaylistUrl("");
-                  }}
-                  className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-                  disabled={loadingPlaylists}
-                >
-                  <option value="">
-                    {loadingPlaylists
-                      ? "Loading your playlists…"
-                      : "Pick one of your playlists"}
-                  </option>
-                  {playlists.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                      {p.tracksTotal > 0 ? ` (${p.tracksTotal})` : ""}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  value={playlistUrl}
-                  onChange={(e) => {
-                    setPlaylistUrl(e.target.value);
-                    if (e.target.value) setSelectedPlaylistId("");
-                  }}
-                  placeholder="…or paste open.spotify.com/playlist/…"
-                  className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-                />
-                <button
-                  type="button"
-                  onClick={() => void importPlaylist()}
-                  disabled={importing}
-                  className="pill shrink-0 bg-accent px-4 py-2 text-sm font-semibold text-background hover:bg-accent-hover disabled:opacity-50"
-                >
-                  {importing ? "Importing…" : "Import playlist"}
-                </button>
-              </div>
-            </section>
-
-            {supportsLocal && (
-              <section className="panel p-4">
-                <h2 className="mb-1 text-sm font-semibold uppercase tracking-wide text-muted">
-                  Add local files → {GENRE_LABELS[genre]}
-                </h2>
-                <p className="mb-3 text-xs text-muted">
-                  Import a folder of MP3s into{" "}
-                  <strong className="text-foreground">
-                    {GENRE_LABELS[genre]}
-                  </strong>
-                  , or link a structured library that already has genre
-                  subfolders.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void onImportFlatFolder()}
-                    className="pill border border-border bg-surface-2 px-4 py-2 text-sm hover:border-accent"
-                  >
-                    Import folder
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onImportStructuredFolder()}
-                    className="pill border border-border bg-surface/70 px-4 py-2 text-sm text-muted transition hover:border-accent hover:text-accent"
-                    title="Expects MyTango/Tango|Vals|Milonga|Cortina"
-                  >
-                    {folderLinked
-                      ? "Rescan structured library"
-                      : "Link structured library"}
-                  </button>
-                </div>
-                <details className="mt-3 text-xs text-muted">
-                  <summary className="cursor-pointer text-foreground/80 hover:text-accent">
-                    What is a structured library?
-                  </summary>
-                  <p className="mt-2">
-                    Optional: one root folder with genre subfolders. Genres come
-                    from folder names (not the active tab):
-                  </p>
-                  <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2/80 p-3 text-[11px] leading-relaxed text-muted">
-{`MyTango/
-  Tango/
-  Vals/
-  Milonga/
-  Cortina/`}
-                  </pre>
-                </details>
-              </section>
-            )}
-
-            <section className="panel p-4">
-              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
-                Add single track from Spotify
-              </h2>
-              <div className="flex flex-wrap gap-2">
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void onSearch()}
-                  placeholder={`Search Spotify for ${GENRE_LABELS[genre]}…`}
-                  className="min-w-[240px] flex-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-sm outline-none focus:border-accent"
-                />
-                <button
-                  type="button"
-                  onClick={() => void onSearch()}
-                  disabled={searching}
-                  className="pill bg-surface-2 px-4 py-2 text-sm font-medium text-foreground hover:bg-border disabled:opacity-50"
-                >
-                  {searching ? "Searching…" : "Search"}
-                </button>
-              </div>
-              {results.length > 0 && (
-                <ul className="mt-4 max-h-64 space-y-2 overflow-y-auto">
-                  {results.map((r) => (
-                    <li
-                      key={r.id}
-                      className="flex items-center justify-between gap-3 rounded-xl bg-surface-2/80 px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{r.name}</p>
-                        <p className="truncate text-xs text-muted">
-                          {r.artists.map((a) => a.name).join(", ")}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void addSpotifyTrack(r)}
-                        className="shrink-0 text-sm text-accent hover:text-accent-hover"
-                      >
-                        Add
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </div>
-        </div>
-      </div>
+      <LibraryImportPanel
+        genre={genre}
+        isOpen={isImportOpen}
+        canAnimate={importCanAnimate}
+        tracks={tracks}
+        supportsLocal={supportsLocal}
+        folderLinked={folderLinked}
+        playlists={playlists}
+        loadingPlaylists={loadingPlaylists}
+        playlistsError={playlistsError}
+        importPlaylistTracks={importPlaylistTracks}
+        getValidToken={getValidToken}
+        upsertTracks={upsertTracks}
+        linkLocalFolder={linkLocalFolder}
+        importLocalFolderToGenre={importLocalFolderToGenre}
+        onMessage={(msg, tone) => {
+          setMessage(msg);
+          setMessageTone(tone);
+        }}
+      />
 
       {message && (
         <p
@@ -462,7 +229,6 @@ export default function LibraryPage() {
       )}
 
       <section>
-        {/* Fixed-height toolbar so the list does not jump when selection changes */}
         <div className="mb-3 flex min-h-9 flex-wrap items-center justify-between gap-3">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
             {GENRE_LABELS[genre]} tracks ({list.length})
@@ -538,6 +304,7 @@ export default function LibraryPage() {
                       {track.artists || track.localRelPath || "—"} ·{" "}
                       <span className="uppercase">{track.source}</span>
                       {track.orchestra ? ` · ${track.orchestra}` : ""}
+                      {track.year != null ? ` · ${track.year}` : ""}
                     </p>
                   </div>
                   <select
@@ -574,6 +341,23 @@ export default function LibraryPage() {
                     onBlur={() => void saveOrchestra(track)}
                     className="w-36 rounded-lg border border-border bg-surface-2 px-2 py-1 text-xs outline-none focus:border-accent"
                   />
+                  <input
+                    placeholder="Year"
+                    inputMode="numeric"
+                    title="Recording / album year — used for tanda suggestions"
+                    value={
+                      yearEdit[track.id] ??
+                      (track.year != null ? String(track.year) : "")
+                    }
+                    onChange={(e) =>
+                      setYearEdit((prev) => ({
+                        ...prev,
+                        [track.id]: e.target.value.replace(/[^\d]/g, "").slice(0, 4),
+                      }))
+                    }
+                    onBlur={() => void saveYear(track)}
+                    className="w-16 rounded-lg border border-border bg-surface-2 px-2 py-1 text-xs outline-none focus:border-accent"
+                  />
                   <button
                     type="button"
                     onClick={() => {
@@ -594,9 +378,10 @@ export default function LibraryPage() {
           </ul>
         )}
         <p className="mt-2 text-[11px] text-muted">
-          <strong className="font-medium text-foreground/70">Orchestra</strong>{" "}
-          = optional tag for the orchestra/ensemble (Di Sarli, Pugliese, …). Helps
-          tanda recommendations group similar vibes — not required for playback.
+          <strong className="font-medium text-foreground/70">Orchestra</strong> and{" "}
+          <strong className="font-medium text-foreground/70">Year</strong>{" "}
+          help tanda suggestions group by ensemble and era. Spotify imports fill
+          these when possible — you can edit anytime. Not required for playback.
         </p>
       </section>
     </AppShell>
